@@ -1,0 +1,19 @@
+manifest_version = 1
+
+[[test_cases]]
+case_id = "transport_detect_packet_size_188"
+description = "Detect 188-byte packet size from a synchronized null-packet stream."
+input_file = "synthetic/transport_detect_packet_size_188.ts"
+input_sha256 = "c4bff2003e1f0d2da05617b0812989a21b9b0bd3008657d6753f84dd94c83a94"
+input_size_bytes = 3008
+packet_size_bytes = 188
+transport = "file"
+license = "Apache-2.0"
+run_in_ci = true
+standards = ["mpeg-ts"]
+
+[[test_cases.expected]]
+category = "transport"
+file = "../expected/transport/transport_detect_packet_size_188.json"
+schema_version = 1
+basis = "generated_specification"

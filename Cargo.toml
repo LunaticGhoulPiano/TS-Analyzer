@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/tsan-core",
+    "crates/tsan-input",
+    "crates/tsan-analyzer",
+    "crates/tsan-runtime",
+    "crates/tsan-recorder",
+    "crates/tsan-player",
+    "crates/tsan-cli",
+    "crates/tsan-gui",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

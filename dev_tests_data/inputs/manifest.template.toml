@@ -1,0 +1,26 @@
+# Field template only. Automated tests must read manifest.toml, not this file.
+
+manifest_version = 1
+
+[[test_cases]]
+case_id = "<domain>_<expected_behavior>_<condition>"
+description = "<short English description>"
+input_file = "<synthetic-or-redistributable>/<case_id>.<extension>"
+input_sha256 = "<64 lowercase hexadecimal characters>"
+input_size_bytes = 0
+packet_size_bytes = 188
+transport = "file"
+license = "<SPDX license expression>"
+run_in_ci = true
+
+# Add only when relevant to the case.
+standards = ["mpeg-ts"]
+multiplex = "spts"
+programs = [1]
+codecs = ["hevc", "aac"]
+
+[[test_cases.expected]]
+category = "<transport-analyzer-tables-clocks-or-tr101290>"
+file = "../expected/<category>/<case_id>.json"
+schema_version = 1
+basis = "<generated_specification-or-manual_validation>"

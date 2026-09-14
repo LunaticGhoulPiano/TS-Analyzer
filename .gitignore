@@ -1,0 +1,28 @@
+# Rust / Cargo build output
+/target/
+**/*.rs.bk
+
+# Local runtime output
+/captures/
+/recordings/
+/logs/
+/coverage/
+*.profraw
+*.profdata
+
+# Local environment
+.env
+.env.local
+
+# Windows / IDE local state
+Thumbs.db
+Desktop.ini
+.vs/
+.idea/
+
+# Large or non-redistributable development test streams
+/dev_tests_data/inputs/local/
+
+# temps
+Implementations.md
+temp.md

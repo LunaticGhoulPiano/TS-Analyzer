@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "<case_id>",
+  "packet_size_bytes": 0,
+  "packet_count": 0,
+  "sync_loss_event_count": 0,
+  "pid_packet_counts": [
+    {
+      "pid": 0,
+      "packet_count": 0
+    }
+  ]
+}

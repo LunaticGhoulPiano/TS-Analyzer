@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "case_id": "transport_detect_packet_size_188",
+  "packet_size_bytes": 188,
+  "packet_count": 16,
+  "sync_loss_event_count": 0,
+  "pid_packet_counts": [
+    {
+      "pid": 8191,
+      "packet_count": 16
+    }
+  ]
+}
