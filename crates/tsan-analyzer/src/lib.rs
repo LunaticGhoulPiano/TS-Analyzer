@@ -1,14 +1,13 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod packets;
+mod transport;
+mod video;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use packets::{PacketRecord, PacketWindow, read_packet_window};
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use transport::{ClockKind, ClockPoint, TableSummary};
+pub use video::VideoMetadata;
+
+pub use transport::{
+    AnalysisReport, BroadcastStandard, MediaInformation, NativeSummary, PidReport, ProgramReport,
+    StreamReport, analyze_file,
+};

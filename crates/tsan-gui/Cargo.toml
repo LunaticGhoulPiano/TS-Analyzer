@@ -10,3 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tsan-analyzer = { path = "../tsan-analyzer" }
+tsan-input = { path = "../tsan-input" }
+tsan-player = { path = "../tsan-player" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+eframe.workspace = true
+raw-window-handle.workspace = true
+windows.workspace = true
+winit.workspace = true

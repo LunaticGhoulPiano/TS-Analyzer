@@ -1,0 +1,16 @@
+[package]
+name = "tsan-tsduck-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+native = []
+
+[build-dependencies]
+cc = "1"
+
+[lints.rust]
+unsafe_code = "allow"

@@ -1,146 +1,52 @@
-# Development Environment
-## Step 1. Rust
-### 1. Ensure Environment
+# 從原始碼建置
+
+## 需求
+
+  - Windows 11 x64、Visual Studio C++ Build Tools（MSVC 與 Windows SDK）。
+  - Rust `1.97.1`／`x86_64-pc-windows-msvc`；repository 的 `rust-toolchain.toml` 已固定版本。
+  - GStreamer **MSVC x64** runtime 與 development 套件，版本至少 `1.28`。編譯時需能找到 GStreamer 的 `pkg-config` 資訊；執行時需能找到 DLL 與 plugins。
+  - TSDuck x64 SDK（headers、`tsduck.lib`／`tscore.lib` 與 DLL）。編譯預設在 `C:\\Program Files\\TSDuck` 尋找；也可設定 `TSDUCK_HOME`。VS Code C/C++ 擴充套件使用 `.vscode/c_cpp_properties.json`；預設以 `ProgramFiles` 定位 TSDuck，自訂安裝位置則由啟動 VS Code 的環境提供 `TSDUCK_HOME`。
+  - 首次編譯需能下載 Cargo 套件及 workspace 指定的 Git 版 `winit`。
+
+## 建置與啟動
+
+  - 以下命令在 repository 根目錄執行；不需重建 crate 或 lockfile。
+
 ```bash
-PS C:\Users\USER\Documents\GitHub\TS-Analyzer> rustc --version
-rustc 1.97.1 (8bab26f4f 2026-07-14)
-PS C:\Users\USER\Documents\GitHub\TS-Analyzer> cargo --version                               
-cargo 1.97.1 (c980f4866 2026-06-30)
-PS C:\Users\USER\Documents\GitHub\TS-Analyzer> rustup show active-toolchain
-stable-x86_64-pc-windows-msvc (default)
-PS C:\Users\USER\Documents\GitHub\TS-Analyzer> rustup component list --installed
-cargo-x86_64-pc-windows-msvc
-clippy-x86_64-pc-windows-msvc
-rust-docs-x86_64-pc-windows-msvc
-rust-std-x86_64-pc-windows-msvc
-rustc-x86_64-pc-windows-msvc
-rustfmt-x86_64-pc-windows-msvc
-PS C:\Users\USER\Documents\GitHub\TS-Analyzer> rustup target list --installed   
-x86_64-pc-windows-msvc
+rustup toolchain install 1.97.1 --profile minimal --target x86_64-pc-windows-msvc
 ```
 
-### 2. Create toolchain at root
-Create `rust-toolchain.toml` at root:
-```toml
-[toolchain]
-channel = "1.97.1"
-profile = "minimal"
-components = ["rustfmt", "clippy"]
-targets = ["x86_64-pc-windows-msvc"]
-```
+  - 以下命令使用 Git Bash；GStreamer 實際安裝位置不同時請修改 `gst_root`。
 
-### 3. Create 8 crates
-#### Core
 ```bash
-cargo new --lib --vcs none crates/tsan-core
-cargo new --lib --vcs none crates/tsan-input
-cargo new --lib --vcs none crates/tsan-analyzer
-cargo new --lib --vcs none crates/tsan-runtime
-cargo new --lib --vcs none crates/tsan-recorder
-cargo new --lib --vcs none crates/tsan-player
-```
-#### App
-```bash
-cargo new --bin --vcs none crates/tsan-cli
-cargo new --bin --vcs none crates/tsan-gui
+gst_root=/c/Program\ Files/gstreamer/1.0/msvc_x86_64
+tsduck_root=/c/Program\ Files/TSDuck
+export TSDUCK_HOME="C:\\Program Files\\TSDuck"
+export PATH="$gst_root/bin:$tsduck_root/bin:$PATH"
+export PKG_CONFIG_PATH="$gst_root/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 ```
 
-### 4. Create cargo at root
-Create `Cargo.toml` at root:
-```toml
-[workspace]
-members = [
-    "crates/tsan-core",
-    "crates/tsan-input",
-    "crates/tsan-analyzer",
-    "crates/tsan-runtime",
-    "crates/tsan-recorder",
-    "crates/tsan-player",
-    "crates/tsan-cli",
-    "crates/tsan-gui",
-]
-resolver = "3"
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.97"
-license = "Apache-2.0"
-publish = false
-
-[workspace.lints.rust]
-unsafe_code = "forbid"
-
-[workspace.lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+```sh
+rustc --version
+cargo --version
+pkg-config --modversion gstreamer-1.0
+gst-inspect-1.0 --version
+cargo metadata --locked --no-deps --format-version 1
+cargo build --locked --workspace
+cargo run --locked -p tsan-gui
 ```
 
-### 5. Edit Cargo.toml of all crates
-Edit all `Cargo.toml` of crates in the following format (for instance, tsan-core):
-```toml
-[package]
-name = "tsan-core" # maintain crate's original name
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
+  - 上面的 `export` 僅對該 Git Bash 工作階段有效。若 TSDuck 不在預設位置、且 VS Code 不是從該工作階段啟動，請將 `TSDUCK_HOME` 設為 Windows 使用者環境變數後重新啟動 VS Code；C++ IntelliSense 才能找到 TSDuck 標頭。`bridge.cpp` 只使用標頭名稱（例如 `#include "tsTSPacket.h"`），不在 `#include` 中放絕對或跨目錄相對路徑。
+  - 若 GStreamer 探測失敗，確認 development 套件的 `lib/pkgconfig` 可由 `PKG_CONFIG_PATH` 找到；若啟動時缺 DLL 或 plugin，確認相同 MSVC x64 安裝的 `bin` 在 `PATH`。不要混用 MinGW 與 MSVC 版本。
+  - Analyzer 預設連結進程內 TSDuck，不會啟動 `tsp`。只建置不含原生 TSDuck 的 Analyzer 可用 `cargo build --locked -p tsan-analyzer --no-default-features`；此模式沒有 TSDuck 的標準／section 統計及 SPS／VUI 幀率。
+  - 目前發行包尚未自帶 TSDuck／GStreamer DLL。從原始碼執行需上述 SDK 與 runtime；未來打包時須一併附上 DLL 與 TSDuck BSD-2-Clause 授權。Linux／macOS 的 bridge 原始碼使用同一 C ABI，但尚未在本專案驗證建置／播放。
 
-[lints]
-workspace = true
+## 驗證
 
-[dependencies]
-```
-
-### 6. Create lock at root
-```bash
-cargo generate-lockfile
-```
-
-### 7. Validate workspace and MSVC linker
-```bash
-# check cargo output all crates
-cargo metadata --no-deps --format-version 1
-
-# full check
+```sh
 cargo fmt --all -- --check
-cargo build --workspace --locked
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-# run tsan-cli
-cargo run --locked -p tsan-cli # output "Hello, world!" means all items pass
+cargo test --locked --workspace
+cargo run --locked -p tsan-player --example gstreamer_smoke
 ```
 
-### 8. Install and initialize cargo-deny
-#### Initialize cargo-deny
-```bash
-# install
-cargo install --locked cargo-deny
-
-# check
-cargo deny --version
-cargo deny help
-
-# init (generate deny.toml)
-cargo deny init
-```
-#### remove comment in deny.toml, for this project is "Apache-2.0"
-```toml
-allow = [
-    #"MIT",
-    #"Apache-2.0",
-    #"Apache-2.0 WITH LLVM-exception",
-]
-```
-
-#### check deny anytime after a new crate is added
-```bash
-cargo deny check
-```
-#### view worktree
-```bash
-cargo tree --workspace
-```
+  - smoke example 會檢查 GStreamer 版本、必要元素及 D3D12／D3D11 adapter；通過不代表所有 TS 檔案或 seek 行為都已驗證。

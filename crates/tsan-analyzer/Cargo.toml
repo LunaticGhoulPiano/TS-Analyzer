@@ -9,4 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["native-tsduck"]
+native-tsduck = ["dep:tsan-tsduck-sys", "tsan-tsduck-sys/native"]
+
 [dependencies]
+tsan-core = { path = "../tsan-core" }
+tsan-tsduck-sys = { path = "../tsan-tsduck-sys", optional = true }

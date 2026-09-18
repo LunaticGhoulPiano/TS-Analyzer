@@ -10,3 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tsan-core = { path = "../tsan-core" }
+tsan-input = { path = "../tsan-input" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true
+raw-window-handle.workspace = true
+windows.workspace = true

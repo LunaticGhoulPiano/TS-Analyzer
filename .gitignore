@@ -2,6 +2,7 @@
 /target/
 **/*.rs.bk
 
+
 # Local runtime output
 /captures/
 /recordings/
@@ -26,3 +27,4 @@ Desktop.ini
 # temps
 Implementations.md
 temp.md
+GeminiAdvice.md

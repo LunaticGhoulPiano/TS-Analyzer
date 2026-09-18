@@ -3,8 +3,8 @@ members = [
     "crates/tsan-core",
     "crates/tsan-input",
     "crates/tsan-analyzer",
+    "crates/tsan-tsduck-sys",
     "crates/tsan-runtime",
-    "crates/tsan-recorder",
     "crates/tsan-player",
     "crates/tsan-cli",
     "crates/tsan-gui",
@@ -18,10 +18,30 @@ rust-version = "1.97"
 license = "Apache-2.0"
 publish = false
 
+[workspace.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "wgpu"] }
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+raw-window-handle = "0.6"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+
+[patch.crates-io]
+winit = { git = "https://github.com/LunaticGhoulPiano/winit.git", rev = "39c4009c41e5977d779cf8a365792c8153ca77c5" }

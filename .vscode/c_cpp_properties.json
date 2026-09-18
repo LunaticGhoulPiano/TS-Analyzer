@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Windows MSVC + TSDuck",
+            "includePath": [
+                "${workspaceFolder}/crates/tsan-tsduck-sys/native",
+                "${env:TSDUCK_HOME}/include/tsduck",
+                "${env:TSDUCK_HOME}/include/tscore",
+                "${env:PROGRAMFILES}/TSDuck/include/tsduck",
+                "${env:PROGRAMFILES}/TSDuck/include/tscore"
+            ],
+            "defines": [
+                "_TSDUCKDLL_USE",
+                "_TSCOREDLL_USE"
+            ],
+            "intelliSenseMode": "windows-msvc-x64",
+            "cppStandard": "c++20"
+        }
+    ],
+    "version": 4
+}
