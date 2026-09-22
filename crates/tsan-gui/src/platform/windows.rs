@@ -1,3 +1,4 @@
+pub mod desktop_capture;
 mod file_dialog;
 
 pub use file_dialog::{

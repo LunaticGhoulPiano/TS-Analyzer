@@ -2662,6 +2662,7 @@ dependencies = [
  "tsan-input",
  "tsan-player",
  "windows",
+ "windows-core",
  "winit",
 ]
 

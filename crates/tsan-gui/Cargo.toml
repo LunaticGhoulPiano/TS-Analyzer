@@ -17,5 +17,26 @@ tsan-player = { path = "../tsan-player" }
 [target.'cfg(target_os = "windows")'.dependencies]
 eframe.workspace = true
 raw-window-handle.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = [
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
 winit.workspace = true
+
+# Only the isolated native composition experiment needs these APIs.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Graphics_Effects",
+    "System",
+    "UI_Composition_Desktop",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_UI_HiDpi",
+] }
+windows-core = "0.62.2"

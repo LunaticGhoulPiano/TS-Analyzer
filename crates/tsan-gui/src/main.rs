@@ -5,6 +5,8 @@ mod analysis_views;
 #[cfg(target_os = "windows")]
 mod app;
 #[cfg(target_os = "windows")]
+mod liquid_glass;
+#[cfg(target_os = "windows")]
 mod logging;
 #[cfg(target_os = "windows")]
 mod platform;

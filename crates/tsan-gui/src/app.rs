@@ -14,7 +14,9 @@ use tsan_player::platform::windows::{
 use tsan_player::{PlayerState, VideoRectangle, VideoSurface};
 
 use crate::analysis_views::{self, ViewState};
+use crate::liquid_glass;
 use crate::logging::{LogCategory, LogEntry, LogLevel};
+use crate::platform::windows::desktop_capture::{DesktopCapture, DesktopFrame};
 use crate::platform::windows::{
     open_transport_stream_dialog, save_analyzed_report_dialog, save_log_dialog,
     save_transport_stream_dialog,
@@ -50,6 +52,7 @@ enum AppTheme {
     Dark,
     Light,
     Transparent,
+    LiquidGlass,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +119,7 @@ impl AppTheme {
             Self::Dark => "Dark",
             Self::Light => "Light",
             Self::Transparent => "Transparent",
+            Self::LiquidGlass => "Liquid Glass",
         }
     }
 }
@@ -178,6 +182,10 @@ pub struct TsanApp {
     export_receiver: Option<Receiver<Result<PathBuf, String>>>,
     update_status: Option<update::UpdateStatus>,
     theme: AppTheme,
+    glass_settings: liquid_glass::Settings,
+    desktop_capture: Option<DesktopCapture>,
+    glass_freeze_request: Option<bool>,
+    glass_frame_ready: bool,
     transparent_background_opacity: u8,
     source_view: Option<InputSourceKind>,
     ip_streaming_protocol: Option<IpStreamingProtocol>,
@@ -204,6 +212,66 @@ pub struct TsanApp {
 }
 
 impl TsanApp {
+    fn glass_background(
+        &mut self,
+        frame: &eframe::Frame,
+        context: &egui::Context,
+    ) -> Option<std::sync::Arc<DesktopFrame>> {
+        if self.theme != AppTheme::LiquidGlass {
+            self.glass_freeze_request = None;
+            self.glass_frame_ready = false;
+            if let Some(mut capture) = self.desktop_capture.take()
+                && let Err(error) = capture.stop()
+            {
+                self.set_local_error(LogCategory::System, error);
+            }
+            return None;
+        }
+        let result = (|| {
+            if self.desktop_capture.is_none() {
+                let window = frame.winit_window().ok_or("Native window is unavailable")?;
+                self.desktop_capture = Some(DesktopCapture::start(window.clone())?);
+            }
+            let capture = self
+                .desktop_capture
+                .as_mut()
+                .ok_or("Desktop capture is unavailable")?;
+            if let Some(freeze) = self.glass_freeze_request.take() {
+                if freeze {
+                    capture.freeze()?;
+                } else {
+                    capture.resume()?;
+                }
+            }
+            capture.update()
+        })();
+        match result {
+            Ok(background) => {
+                self.glass_frame_ready = background.is_some();
+                background
+            }
+            Err(error) => {
+                if let Some(mut capture) = self.desktop_capture.take()
+                    && let Err(restore_error) = capture.stop()
+                {
+                    self.record_log(LogLevel::Error, LogCategory::System, restore_error);
+                }
+                if let Some(state) = frame.wgpu_render_state() {
+                    liquid_glass::release(state);
+                }
+                self.glass_freeze_request = None;
+                self.glass_frame_ready = false;
+                self.theme = AppTheme::Transparent;
+                apply_theme(context, self.theme, self.transparent_background_opacity);
+                self.set_local_error(
+                    LogCategory::System,
+                    format!("Liquid Glass capture failed; using Transparent. {error}"),
+                );
+                None
+            }
+        }
+    }
+
     pub fn new(context: &eframe::CreationContext<'_>, initial_input: Option<PathBuf>) -> Self {
         let transparent_background_opacity = DEFAULT_TRANSPARENT_BACKGROUND_OPACITY;
         apply_theme(
@@ -236,6 +304,10 @@ impl TsanApp {
             export_receiver: None,
             update_status: None,
             theme: AppTheme::Light,
+            glass_settings: liquid_glass::Settings::default(),
+            desktop_capture: None,
+            glass_freeze_request: None,
+            glass_frame_ready: false,
             transparent_background_opacity,
             source_view: None,
             ip_streaming_protocol: None,
@@ -756,6 +828,38 @@ impl TsanApp {
                                 AppTheme::Light,
                                 egui::RichText::new("Light").size(SYSTEM_TEXT_SIZE),
                             );
+                            ui.selectable_value(
+                                &mut self.theme,
+                                AppTheme::LiquidGlass,
+                                egui::RichText::new("Liquid Glass (experimental)").size(SYSTEM_TEXT_SIZE),
+                            ).on_hover_text("Live mode hides this window from screenshots. Freeze the background in Glass settings before taking a screenshot.");
+                            if self.theme == AppTheme::LiquidGlass {
+                                ui.menu_button("Glass settings", |ui| {
+                                    ui.set_max_width(340.0);
+                                    let frozen = self.desktop_capture.as_ref().is_some_and(DesktopCapture::is_frozen);
+                                    if frozen {
+                                        ui.label("Frozen: capture is stopped. Screenshots and screen sharing include this window.");
+                                        ui.label("The background stays fixed when the window moves or resizes.");
+                                        if ui.button("Resume live background").clicked() {
+                                            self.glass_freeze_request = Some(false);
+                                            ui.close();
+                                        }
+                                    } else {
+                                        ui.label("Live: Windows 10 2004+ / Windows 11. This window is hidden from screenshots and screen sharing.");
+                                        ui.label("Keep the window on one display. Windows shows a capture border.");
+                                        if ui.add_enabled(self.glass_frame_ready, egui::Button::new("Freeze background / screenshot mode")).clicked() {
+                                            self.glass_freeze_request = Some(true);
+                                            ui.close();
+                                        }
+                                    }
+                                    ui.separator();
+                                    self.glass_settings.ui(ui);
+                                    include_popup_rectangle(
+                                        &mut popup_rectangle,
+                                        ui.min_rect().expand(6.0),
+                                    );
+                                });
+                            }
                             let transparent_menu = ui.menu_button(
                                 egui::RichText::new("Transparent").size(SYSTEM_TEXT_SIZE),
                                 |ui| {
@@ -937,6 +1041,11 @@ impl TsanApp {
             root_ui.ctx().request_repaint();
         }
         if previous_theme != self.theme {
+            if self.theme != AppTheme::LiquidGlass
+                && let Some(state) = frame.wgpu_render_state()
+            {
+                liquid_glass::release(state);
+            }
             self.record_log(
                 LogLevel::Info,
                 LogCategory::Configuration,
@@ -2666,8 +2775,16 @@ fn middle_drag_scroll(ui: &egui::Ui, id_salt: &'static str) {
 }
 
 impl eframe::App for TsanApp {
+    fn on_exit(&mut self) {
+        if let Some(mut capture) = self.desktop_capture.take()
+            && let Err(error) = capture.stop()
+        {
+            eprintln!("Liquid Glass: {error}");
+        }
+    }
+
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        if self.theme == AppTheme::Transparent {
+        if matches!(self.theme, AppTheme::Transparent | AppTheme::LiquidGlass) {
             egui::Color32::TRANSPARENT.to_normalized_gamma_f32()
         } else {
             egui::Color32::from_rgb(
@@ -2682,13 +2799,35 @@ impl eframe::App for TsanApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.receive_snapshots();
         let context = root_ui.ctx().clone();
-        context.request_repaint_after(Duration::from_millis(50));
+        context.request_repaint_after(Duration::from_millis(
+            if self.theme == AppTheme::LiquidGlass
+                && !self
+                    .desktop_capture
+                    .as_ref()
+                    .is_some_and(DesktopCapture::is_frozen)
+            {
+                33
+            } else {
+                50
+            },
+        ));
         self.comparison_limit = maximum_comparison_documents(context.content_rect().width());
 
+        let glass_rect = root_ui.max_rect();
+        let glass_painter = root_ui.painter().with_clip_rect(glass_rect);
+        let glass_shape = glass_painter.add(egui::Shape::Noop);
         let popup_rectangle = self.application_header(root_ui, frame);
+        let background = self.glass_background(frame, &context);
         self.error_banner(root_ui);
         self.navigation(root_ui);
         egui::CentralPanel::default().show(root_ui, |ui| {
+            if self.theme == AppTheme::LiquidGlass
+                && self.desktop_capture.as_ref().is_some_and(DesktopCapture::is_frozen) {
+                ui.weak("Glass background frozen — screenshots enabled. Resume live mode in Theme > Glass settings.");
+            }
+            if self.theme == AppTheme::LiquidGlass && background.is_none() {
+                ui.weak("Waiting for desktop capture. Keep the window fully on one display.");
+            }
             if self.page == Page::Analyzer {
                 self.document_tabs(ui);
             }
@@ -2698,6 +2837,31 @@ impl eframe::App for TsanApp {
                 Page::Log => self.log_page(ui, frame),
             }
         });
+
+        if self.theme == AppTheme::LiquidGlass {
+            if let Some(background) = background
+                && let Some(state) = frame.wgpu_render_state()
+            {
+                glass_painter.set(
+                    glass_shape,
+                    liquid_glass::callback(
+                        glass_rect,
+                        background,
+                        self.glass_settings,
+                        state.target_format,
+                    ),
+                );
+            } else {
+                glass_painter.set(
+                    glass_shape,
+                    egui::Shape::rect_filled(
+                        glass_rect,
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(16, 22, 30, 150),
+                    ),
+                );
+            }
+        }
 
         if self.source_view == Some(InputSourceKind::TransportStreamFile)
             && matches!(self.video_mode, VideoMode::Detached | VideoMode::Fullscreen)
@@ -2833,6 +2997,10 @@ fn apply_theme(context: &egui::Context, theme: AppTheme, transparent_background_
         AppTheme::System => context.set_theme(egui::ThemePreference::System),
         AppTheme::Dark => context.set_theme(egui::ThemePreference::Dark),
         AppTheme::Light => context.set_theme(egui::ThemePreference::Light),
+        AppTheme::LiquidGlass => {
+            context.set_theme(egui::ThemePreference::Dark);
+            context.set_visuals(liquid_glass::visuals());
+        }
         AppTheme::Transparent => {
             context.set_theme(egui::ThemePreference::Dark);
             context.set_visuals(transparent_visuals(transparent_background_opacity));
@@ -3173,5 +3341,301 @@ mod tests {
         let popup = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(40.0, 40.0));
 
         assert_eq!(physical_video_exclusion(video, popup, 1.0), None);
+    }
+}
+
+#[cfg(test)]
+mod glass_window_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Instant;
+    use winit::platform::windows::EventLoopBuilderExtWindows;
+
+    struct CaptureSmokeApp {
+        app: TsanApp,
+        started: Instant,
+        rendered: usize,
+        stage: u8,
+        lifecycle_done: bool,
+        motion_frames: usize,
+        frozen_frame: Option<std::sync::Arc<DesktopFrame>>,
+        frozen_at: Instant,
+        result: Option<mpsc::Sender<Result<(), String>>>,
+    }
+
+    impl CaptureSmokeApp {
+        fn advance_lifecycle(&mut self, ui: &egui::Ui) -> Result<bool, String> {
+            let background = self
+                .app
+                .desktop_capture
+                .as_ref()
+                .map(DesktopCapture::update)
+                .transpose()?
+                .flatten();
+            match self.stage {
+                0 if background.is_some() => {
+                    self.stage = 9;
+                }
+                9 => {
+                    if background.is_none() {
+                        return Err(
+                            "Live glass disappeared during continuous window motion".to_owned()
+                        );
+                    }
+                    if self.motion_frames < 20 {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                                100.0 + self.motion_frames as f32 * 3.0,
+                                100.0,
+                            )));
+                        self.motion_frames += 1;
+                    } else {
+                        self.app.glass_freeze_request = Some(true);
+                        self.stage = 1;
+                    }
+                }
+                1 => {
+                    if !self
+                        .app
+                        .desktop_capture
+                        .as_ref()
+                        .is_some_and(DesktopCapture::is_frozen)
+                    {
+                        return Err("Freeze action did not stop live mode".to_owned());
+                    }
+                    self.frozen_frame = background;
+                    self.frozen_at = Instant::now();
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                            840.0, 540.0,
+                        )));
+                    self.stage = 2;
+                }
+                2 => {
+                    let old = self.frozen_frame.as_ref().ok_or("Missing frozen image")?;
+                    let current = background
+                        .as_ref()
+                        .ok_or("Frozen image lost after resizing")?;
+                    if !std::sync::Arc::ptr_eq(old, current) {
+                        return Err("Frozen image changed without an explicit resume".to_owned());
+                    }
+                    if self.frozen_at.elapsed() >= Duration::from_millis(150) {
+                        self.app.glass_freeze_request = Some(false);
+                        self.stage = 3;
+                    }
+                }
+                3 if background.is_some() => {
+                    if self
+                        .app
+                        .desktop_capture
+                        .as_ref()
+                        .is_some_and(DesktopCapture::is_frozen)
+                        || background.as_ref().map(|image| image.sequence)
+                            <= self.frozen_frame.as_ref().map(|image| image.sequence)
+                    {
+                        return Err("Resume did not deliver a new live frame".to_owned());
+                    }
+                    self.app.theme = AppTheme::Transparent;
+                    self.stage = 4;
+                }
+                4 => {
+                    if self.app.desktop_capture.is_some() {
+                        return Err("Theme change retained a capture session".to_owned());
+                    }
+                    self.app.theme = AppTheme::LiquidGlass;
+                    self.stage = 5;
+                }
+                5 if background.is_some() => {
+                    self.app
+                        .desktop_capture
+                        .as_ref()
+                        .ok_or("Missing capture")?
+                        .fail_for_test("Simulated capture device loss")?;
+                    self.stage = 6;
+                }
+                6 => {
+                    if self.app.theme != AppTheme::Transparent
+                        || self.app.desktop_capture.is_some()
+                        || !self
+                            .app
+                            .local_error
+                            .as_deref()
+                            .is_some_and(|error| error.contains("Simulated capture device loss"))
+                    {
+                        return Err("Capture failure did not clean up and fall back".to_owned());
+                    }
+                    self.app.theme = AppTheme::LiquidGlass;
+                    self.app.local_error = None;
+                    self.stage = 7;
+                }
+                7 if background.is_some() => {
+                    self.app.glass_freeze_request = Some(true);
+                    self.stage = 8;
+                }
+                8 => {
+                    if !self
+                        .app
+                        .desktop_capture
+                        .as_ref()
+                        .is_some_and(DesktopCapture::is_frozen)
+                    {
+                        return Err("Cannot freeze after restarting the theme".to_owned());
+                    }
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            apply_theme(
+                ui.ctx(),
+                self.app.theme,
+                self.app.transparent_background_opacity,
+            );
+            Ok(false)
+        }
+    }
+
+    impl eframe::App for CaptureSmokeApp {
+        fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+            self.app.clear_color(visuals)
+        }
+
+        fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+            self.app.ui(ui, frame);
+            if !self.lifecycle_done {
+                let progress = self.advance_lifecycle(ui);
+                let error = match progress {
+                    Ok(true) => {
+                        self.lifecycle_done = true;
+                        None
+                    }
+                    Ok(false) if self.started.elapsed() < Duration::from_secs(20) => return,
+                    Ok(false) => Some(format!("Timed out in glass lifecycle stage {}", self.stage)),
+                    Err(error) => Some(error),
+                };
+                if let Some(error) = error {
+                    if let Some(sender) = self.result.take() {
+                        let _ = sender.send(Err(error));
+                    }
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+            }
+            let screenshot = ui.input(|input| {
+                input.events.iter().find_map(|event| {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        Some(image.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
+            let outcome = if self.started.elapsed() > Duration::from_secs(25) {
+                Some(Err("Timed out waiting for the glass framebuffer".to_owned()))
+            } else if self.app.theme != AppTheme::LiquidGlass {
+                Some(Err(self
+                    .app
+                    .local_error
+                    .clone()
+                    .unwrap_or_else(|| "Glass unexpectedly disabled".to_owned())))
+            } else if self
+                .app
+                .desktop_capture
+                .as_ref()
+                .is_some_and(|capture| capture.update().is_ok_and(|frame| frame.is_some()))
+            {
+                self.rendered += 1;
+                if let Some(path) = std::env::var_os("LIQUID_GLASS_APP_PREVIEW") {
+                    if self.rendered == 4 {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                                Default::default(),
+                            ));
+                    }
+                    screenshot.map(|image| {
+                        let path = PathBuf::from(path);
+                        let pixels: Vec<u8> = image
+                            .pixels
+                            .iter()
+                            .flat_map(|pixel| pixel.to_array())
+                            .collect();
+                        fs::write(&path, pixels)
+                            .and_then(|()| {
+                                fs::write(
+                                    path.with_extension("size"),
+                                    format!("{} {}", image.size[0], image.size[1]),
+                                )
+                            })
+                            .map_err(|e| e.to_string())
+                    })
+                } else {
+                    (self.rendered >= 4).then_some(Ok(()))
+                }
+            } else if self.started.elapsed() > Duration::from_secs(25) {
+                Some(Err(
+                    "No aligned desktop frame reached the actual egui window".to_owned(),
+                ))
+            } else {
+                None
+            };
+            if let Some(outcome) = outcome {
+                if let Some(sender) = self.result.take() {
+                    let _ = sender.send(outcome);
+                }
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
+        fn on_exit(&mut self) {
+            self.app.on_exit();
+        }
+    }
+
+    #[test]
+    #[ignore = "opens a temporary TS Analyzer window and exercises Windows capture with OpenGL"]
+    fn real_transparent_window_renders_captured_glass() -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, receiver) = mpsc::channel();
+        let mut wgpu_options = eframe::WgpuConfiguration::default();
+        if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+            setup.instance_descriptor.backends = eframe::wgpu::Backends::GL;
+        }
+        eframe::run_native(
+            "Liquid Glass integration smoke test",
+            eframe::NativeOptions {
+                renderer: eframe::Renderer::Wgpu,
+                wgpu_options,
+                event_loop_builder: Some(Box::new(|builder| {
+                    builder.with_any_thread(true);
+                })),
+                viewport: egui::ViewportBuilder::default()
+                    .with_transparent(true)
+                    .with_active(false)
+                    .with_position([100.0, 100.0])
+                    .with_inner_size([800.0, 520.0]),
+                ..Default::default()
+            },
+            Box::new(move |context| {
+                let mut app = TsanApp::new(context, None);
+                app.theme = AppTheme::LiquidGlass;
+                apply_theme(
+                    &context.egui_ctx,
+                    app.theme,
+                    app.transparent_background_opacity,
+                );
+                Ok(Box::new(CaptureSmokeApp {
+                    app,
+                    started: Instant::now(),
+                    rendered: 0,
+                    stage: 0,
+                    lifecycle_done: false,
+                    motion_frames: 0,
+                    frozen_frame: None,
+                    frozen_at: Instant::now(),
+                    result: Some(sender),
+                }))
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        receiver.recv_timeout(Duration::from_secs(1))??;
+        Ok(())
     }
 }
