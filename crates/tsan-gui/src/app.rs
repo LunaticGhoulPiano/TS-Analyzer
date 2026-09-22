@@ -21,13 +21,19 @@ use crate::platform::windows::{
 };
 use crate::player_worker::{PlayerCommand, PlayerSnapshot, PlayerWorkerHandle};
 use crate::report_export::{self, ExportInput, ReportFormat};
+use crate::ui_components::{ArrowScrollArea, ResizeHandle};
+use crate::update;
 
 const VIDEO_VIEWPORT_ID: &str = "tsan-video-output";
 const PLAYER_CONTROLS_HEIGHT: f32 = 78.0;
 const PLAYER_DETAILS_RESERVED_HEIGHT: f32 = 132.0;
 const PLAYER_ICON_SIZE: f32 = 34.0;
 const SYSTEM_TEXT_SIZE: f32 = 16.0;
+const HEADER_MENU_TEXT_SIZE: f32 = 14.0;
+const NAVIGATION_DEFAULT_WIDTH: f32 = 210.0;
 const MAX_CONCURRENT_ANALYSES: usize = 2;
+const BASELINE_COMPARISON_WINDOW_WIDTH: f32 = 1920.0;
+const BASELINE_COMPARISON_COUNT: usize = 3;
 // 0 is fully transparent and 255 is fully opaque. This controls tint, not blur radius.
 const DEFAULT_TRANSPARENT_BACKGROUND_OPACITY: u8 = 195;
 
@@ -73,6 +79,25 @@ enum NavigationAction {
     PlayDocument(usize),
     CloseDocument(usize),
     ToggleVisibleDocument(usize),
+    ReorderDocument(usize, usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DocumentDrag {
+    index: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DocumentDropAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PaneResizeDrag {
+    divider: usize,
+    left: f32,
+    right: f32,
 }
 
 struct AnalyzerDocument {
@@ -81,6 +106,7 @@ struct AnalyzerDocument {
     report: Option<AnalysisReport>,
     error: Option<String>,
     expanded: bool,
+    view_state: ViewState,
 }
 
 impl AppTheme {
@@ -143,10 +169,14 @@ pub struct TsanApp {
     documents: Vec<AnalyzerDocument>,
     selected_document: Option<usize>,
     visible_documents: Vec<usize>,
-    pane_widths: [f32; 3],
+    pane_widths: Vec<f32>,
+    pane_resize_drag: Option<PaneResizeDrag>,
+    navigation_width: f32,
+    comparison_limit: usize,
     recent_files: Vec<PathBuf>,
     export_selected: Vec<bool>,
     export_receiver: Option<Receiver<Result<PathBuf, String>>>,
+    update_status: Option<update::UpdateStatus>,
     theme: AppTheme,
     transparent_background_opacity: u8,
     source_view: Option<InputSourceKind>,
@@ -160,7 +190,6 @@ pub struct TsanApp {
     snapshot: PlayerSnapshot,
     analyzer_pid_filter: String,
     analyzer_selected_pid: Option<u16>,
-    analysis_view_state: ViewState,
     worker: PlayerWorkerHandle,
     embedded_video_host: Option<WindowsVideoHost>,
     embedded_window_rectangle: Option<VideoRectangle>,
@@ -179,7 +208,7 @@ impl TsanApp {
         let transparent_background_opacity = DEFAULT_TRANSPARENT_BACKGROUND_OPACITY;
         apply_theme(
             &context.egui_ctx,
-            AppTheme::Transparent,
+            AppTheme::Light,
             transparent_background_opacity,
         );
 
@@ -198,11 +227,15 @@ impl TsanApp {
             documents: Vec::new(),
             selected_document: None,
             visible_documents: Vec::new(),
-            pane_widths: [0.5, 0.5, 0.0],
+            pane_widths: Vec::new(),
+            pane_resize_drag: None,
+            navigation_width: NAVIGATION_DEFAULT_WIDTH,
+            comparison_limit: BASELINE_COMPARISON_COUNT,
             recent_files: load_recent_files(),
             export_selected: Vec::new(),
             export_receiver: None,
-            theme: AppTheme::Transparent,
+            update_status: None,
+            theme: AppTheme::Light,
             transparent_background_opacity,
             source_view: None,
             ip_streaming_protocol: None,
@@ -215,7 +248,6 @@ impl TsanApp {
             snapshot: PlayerSnapshot::default(),
             analyzer_pid_filter: String::new(),
             analyzer_selected_pid: None,
-            analysis_view_state: ViewState::new(),
             worker: PlayerWorkerHandle::spawn(),
             embedded_video_host,
             embedded_window_rectangle: None,
@@ -258,6 +290,7 @@ impl TsanApp {
             if !self.visible_documents.contains(&index) {
                 self.visible_documents.clear();
                 self.visible_documents.push(index);
+                self.pane_widths = equal_pane_weights(1);
             }
             return;
         }
@@ -269,11 +302,13 @@ impl TsanApp {
             report: None,
             error: None,
             expanded: false,
+            view_state: ViewState::new(),
         });
         self.start_pending_analyses();
         self.selected_document = Some(self.documents.len() - 1);
         self.visible_documents.clear();
         self.visible_documents.push(self.documents.len() - 1);
+        self.pane_widths = equal_pane_weights(1);
         self.recent_files.retain(|path| path != input);
         self.recent_files.insert(0, input.to_path_buf());
         self.recent_files.truncate(12);
@@ -704,7 +739,7 @@ impl TsanApp {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button(
                         egui::RichText::new(format!("Theme: {}", self.theme.name()))
-                            .size(SYSTEM_TEXT_SIZE),
+                            .size(HEADER_MENU_TEXT_SIZE),
                         |ui| {
                             ui.selectable_value(
                                 &mut self.theme,
@@ -755,7 +790,8 @@ impl TsanApp {
                         },
                     );
                     ui.menu_button(
-                        egui::RichText::new("Import Transport Stream ...").size(SYSTEM_TEXT_SIZE),
+                        egui::RichText::new("Import Transport Stream ...")
+                            .size(HEADER_MENU_TEXT_SIZE),
                         |ui| {
                             if ui.button("Import File ...").clicked() {
                                 open_requested = true;
@@ -783,14 +819,16 @@ impl TsanApp {
                         },
                     );
                     ui.menu_button(
-                        egui::RichText::new("Export Analyzed Report ...").size(SYSTEM_TEXT_SIZE),
+                        egui::RichText::new("Export Analyzed Report ...")
+                            .size(HEADER_MENU_TEXT_SIZE),
                         |ui| {
                             ui.set_min_width(360.0);
-                            ui.strong("TS Queue — checked files are included");
+                            ui.strong("Transport Streams — checked files are included");
                             if self.documents.is_empty() {
                                 ui.weak("Import a transport stream first.");
                             }
-                            for (index, document) in self.documents.iter().enumerate() {
+                            for index in self.visible_documents.iter().copied() {
+                                let document = &self.documents[index];
                                 let name = document
                                     .path
                                     .file_name()
@@ -828,14 +866,49 @@ impl TsanApp {
                             );
                         },
                     );
-                    ui.menu_button(egui::RichText::new("Help").size(SYSTEM_TEXT_SIZE), |ui| {
-                        ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                        ui.hyperlink_to(
-                            "GitHub Link",
-                            "https://github.com/LunaticGhoulPiano/TS-Analyzer",
-                        );
-                        include_popup_rectangle(&mut popup_rectangle, ui.min_rect().expand(6.0));
-                    });
+                    ui.menu_button(
+                        egui::RichText::new("Help").size(HEADER_MENU_TEXT_SIZE),
+                        |ui| {
+                            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                            ui.hyperlink_to(
+                                "GitHub Link",
+                                "https://github.com/LunaticGhoulPiano/TS-Analyzer",
+                            );
+                            include_popup_rectangle(
+                                &mut popup_rectangle,
+                                ui.min_rect().expand(6.0),
+                            );
+                        },
+                    );
+                    ui.menu_button(
+                        egui::RichText::new("Update").size(HEADER_MENU_TEXT_SIZE),
+                        |ui| {
+                            let backend = update::platform_backend();
+                            ui.strong(format!(
+                                "{} {}",
+                                backend.platform,
+                                env!("CARGO_PKG_VERSION")
+                            ));
+                            ui.label(format!(
+                                "Target: {}/{}",
+                                backend.target_os, backend.target_arch
+                            ));
+                            ui.weak(backend.artifact_policy);
+                            if ui.button("Check for updates").clicked() {
+                                self.update_status = Some(update::check_for_updates());
+                            }
+                            if let Some(status) = &self.update_status {
+                                ui.separator();
+                                ui.add(egui::Label::new(status.message()).wrap());
+                            } else {
+                                ui.weak("No update check has been run.");
+                            }
+                            include_popup_rectangle(
+                                &mut popup_rectangle,
+                                ui.min_rect().expand(6.0),
+                            );
+                        },
+                    );
                 });
             });
 
@@ -910,25 +983,55 @@ impl TsanApp {
                 .fill(root_ui.visuals().window_fill)
                 .stroke(root_ui.visuals().window_stroke);
         }
-        egui::Panel::left("navigation")
+        let navigation = egui::Panel::left("navigation")
             .resizable(true)
-            .default_size(210.0)
+            .min_size(150.0)
+            .default_size(self.navigation_width)
             .frame(navigation_frame)
             .show(root_ui, |ui| {
                 ui.add_space(6.0);
                 ui.strong("Pages");
                 ui.separator();
-                egui::ScrollArea::vertical()
+                ArrowScrollArea::vertical()
                     .id_salt("pages-navigation-scroll")
                     .max_height((ui.available_height() * 0.55).max(180.0))
                     .show(ui, |ui| self.pages_navigation(ui, &mut action));
                 ui.separator();
-                ui.strong(format!("TS Queue ({})", self.documents.len()));
-                egui::ScrollArea::vertical()
-                    .id_salt("ts-queue-scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.queue_navigation(ui, &mut action));
+                egui::CollapsingHeader::new(format!(
+                    "Transport Streams ({})",
+                    self.documents.len()
+                ))
+                .default_open(true)
+                .show(ui, |ui| {
+                    let at_capacity = self.visible_documents.len() >= self.comparison_limit;
+                    let status_color = if at_capacity {
+                        ui.visuals().warn_fg_color
+                    } else {
+                        ui.visuals().hyperlink_color
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!(
+                                "Comparing {} / maximum {} TS files",
+                                self.visible_documents.len(),
+                                self.comparison_limit
+                            ))
+                            .strong()
+                            .color(status_color),
+                        )
+                        .wrap(),
+                    )
+                    .on_hover_text(
+                        "The maximum updates automatically with the current window width. \
+                         1920 px supports 3, 2560 px supports 4, and 3840 px supports 6.",
+                    );
+                    ArrowScrollArea::vertical()
+                        .id_salt("transport-streams-scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.queue_navigation(ui, &mut action));
+                });
             });
+        self.navigation_width = navigation.response.rect.width();
         if let Some(action) = action {
             self.apply_navigation(action);
         }
@@ -1004,13 +1107,14 @@ impl TsanApp {
     }
 
     fn queue_navigation(&self, ui: &mut egui::Ui, action: &mut Option<NavigationAction>) {
+        let document_count = self.documents.len();
         for (index, document) in self.documents.iter().enumerate() {
             let name = document
                 .path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| document.path.display().to_string());
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let mut visible = self.visible_documents.contains(&index);
                 if ui
                     .checkbox(&mut visible, "")
@@ -1019,12 +1123,29 @@ impl TsanApp {
                 {
                     *action = Some(NavigationAction::ToggleVisibleDocument(index));
                 }
+                let close_width = ui.spacing().interact_size.x + ui.spacing().item_spacing.x;
+                let label_width = (ui.available_width() - close_width).max(48.0);
                 let response = ui
-                    .selectable_label(
-                        self.selected_document == Some(index),
-                        format!("{} {}", if document.expanded { "▾" } else { "▸" }, name),
-                    )
+                    .vertical(|ui| {
+                        ui.set_width(label_width);
+                        ui.add(
+                            egui::Button::selectable(self.selected_document == Some(index), name)
+                                .wrap()
+                                .sense(egui::Sense::click_and_drag()),
+                        )
+                    })
+                    .inner
                     .on_hover_text(document.path.display().to_string());
+                response.dnd_set_drag_payload(DocumentDrag { index });
+                if let Some((from, to)) = document_reorder_from_drop(
+                    ui,
+                    &response,
+                    index,
+                    document_count,
+                    DocumentDropAxis::Vertical,
+                ) {
+                    *action = Some(NavigationAction::ReorderDocument(from, to));
+                }
                 if response.double_clicked() {
                     *action = Some(NavigationAction::ExpandDocument(index));
                 } else if response.clicked() {
@@ -1036,7 +1157,12 @@ impl TsanApp {
             });
             if document.expanded {
                 ui.indent(("queue-document", index), |ui| {
-                    ui.small(document.path.display().to_string());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(document.path.display().to_string()).small(),
+                        )
+                        .wrap(),
+                    );
                     if ui.button("Play TS").clicked() {
                         *action = Some(NavigationAction::PlayDocument(index));
                     }
@@ -1068,6 +1194,7 @@ impl TsanApp {
                 if !self.visible_documents.contains(&index) {
                     self.visible_documents.clear();
                     self.visible_documents.push(index);
+                    self.pane_widths = equal_pane_weights(1);
                 }
                 self.analyzer_selected_pid = None;
                 self.select_page(Page::Analyzer);
@@ -1086,25 +1213,54 @@ impl TsanApp {
                     if self.visible_documents.len() > 1 {
                         self.visible_documents.remove(position);
                         self.selected_document = self.visible_documents.first().copied();
+                        self.pane_widths = equal_pane_weights(self.visible_documents.len());
                     }
-                } else if self.visible_documents.len() < 3 {
+                } else if self.visible_documents.len() < self.comparison_limit {
                     self.visible_documents.push(index);
+                    self.visible_documents.sort_unstable();
                     self.selected_document = Some(index);
-                    self.pane_widths = [1.0 / self.visible_documents.len() as f32; 3];
+                    self.pane_widths = equal_pane_weights(self.visible_documents.len());
                 } else {
                     self.set_local_error(
                         LogCategory::Analysis,
-                        "At most three TS files can be displayed side by side.",
+                        format!(
+                            "The current window width supports up to {} TS files side by side.",
+                            self.comparison_limit
+                        ),
                     );
                 }
                 self.select_page(Page::Analyzer);
             }
             NavigationAction::CloseDocument(index) => self.close_document(index),
+            NavigationAction::ReorderDocument(from, to) => self.reorder_document(from, to),
             NavigationAction::PlayDocument(index) => {
                 let path = self.documents[index].path.clone();
                 self.load_player_input(path);
             }
         }
+    }
+
+    fn reorder_document(&mut self, from: usize, to: usize) {
+        if from >= self.documents.len() || to >= self.documents.len() || from == to {
+            return;
+        }
+
+        let document = self.documents.remove(from);
+        let export_selected = self.export_selected.remove(from);
+        self.documents.insert(to, document);
+        self.export_selected.insert(to, export_selected);
+        self.selected_document = self
+            .selected_document
+            .map(|index| remap_moved_index(index, from, to));
+        for index in &mut self.visible_documents {
+            *index = remap_moved_index(*index, from, to);
+        }
+        self.visible_documents.sort_unstable();
+        self.record_log(
+            LogLevel::Info,
+            LogCategory::Analysis,
+            format!("Reordered TS from position {} to {}", from + 1, to + 1),
+        );
     }
 
     fn close_document(&mut self, index: usize) {
@@ -1121,9 +1277,10 @@ impl TsanApp {
         }
         self.selected_document = self.selected_document.and_then(|current| {
             if current == index {
-                self.visible_documents.first().copied().or_else(|| {
-                    (!self.documents.is_empty()).then_some(index.min(self.documents.len() - 1))
-                })
+                self.visible_documents
+                    .first()
+                    .copied()
+                    .or_else(|| remaining_document_index(index, self.documents.len()))
             } else {
                 Some(current - usize::from(current > index))
             }
@@ -1133,7 +1290,7 @@ impl TsanApp {
                 self.visible_documents.push(current);
             }
         }
-        self.pane_widths = [1.0 / self.visible_documents.len().max(1) as f32; 3];
+        self.pane_widths = equal_pane_weights(self.visible_documents.len());
         self.record_log(
             LogLevel::Info,
             LogCategory::Analysis,
@@ -1153,7 +1310,8 @@ impl TsanApp {
             .and_then(|document| document.report.as_ref())
             .map(|report| report.standard)
         {
-            Some(BroadcastStandard::AtscPsip) => "ATSC (PSIP detected)",
+            Some(BroadcastStandard::AtscPsip) => "ATSC 1.0 (TVCT/PSIP detected)",
+            Some(BroadcastStandard::AtscCablePsip) => "ATSC Cable PSIP (CVCT detected)",
             Some(BroadcastStandard::DvbSi) => "DVB (SI detected)",
             Some(BroadcastStandard::Isdb) => "ISDB (TSDuck detected)",
             Some(BroadcastStandard::Scte) => "SCTE (TSDuck detected)",
@@ -1305,27 +1463,49 @@ impl TsanApp {
     }
 
     fn analyzer_page(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .id_salt(("analyzer-page-scroll", self.analyzer_view as u8))
+        let view = self.analyzer_view;
+        if matches!(view, AnalyzerView::Packets | AnalyzerView::Tr101290) {
+            self.analyzer_section(ui, view);
+            return;
+        }
+
+        let viewport = ui.available_size();
+        ArrowScrollArea::both()
+            .id_salt(("analyzer-page-scroll", view as u8))
+            .max_width(viewport.x)
+            .max_height(viewport.y)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                middle_drag_scroll(ui, "analyzer-page-middle-scroll");
-                match self.analyzer_view {
-                    AnalyzerView::Overview => self.analyzer_overview(ui),
+                if !matches!(
+                    view,
+                    AnalyzerView::Bitrate | AnalyzerView::Timestamps | AnalyzerView::Gop
+                ) {
+                    middle_drag_scroll(ui, "analyzer-page-middle-scroll");
+                }
+                match view {
+                    AnalyzerView::Overview => self.analyzer_overview(ui, viewport.x),
                     view => self.analyzer_section(ui, view),
                 }
             });
     }
 
-    fn analyzer_overview(&mut self, ui: &mut egui::Ui) {
+    fn analyzer_overview(&mut self, ui: &mut egui::Ui, viewport_width: f32) {
+        const PROGRAMS_MIN_SCROLLED_HEIGHT: f32 = 180.0;
+
+        let section_content_width = (viewport_width - 34.0).max(120.0);
         if let Some(document) = self.selected_document() {
             ui.label(document.path.display().to_string());
         }
-        egui::ScrollArea::vertical()
-            .id_salt("information-scroll")
-            .max_height(300.0)
-            .show(ui, |ui| self.information(ui));
-        ui.separator();
+        egui::Frame::group(ui.style())
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(section_content_width);
+                ArrowScrollArea::vertical()
+                    .id_salt("information-scroll")
+                    .max_height(300.0)
+                    .show(ui, |ui| self.information(ui));
+            });
+        ui.add_space(8.0);
         if let Some(error) = self
             .selected_document()
             .and_then(|document| document.error.as_ref())
@@ -1352,17 +1532,29 @@ impl TsanApp {
             return;
         };
         let standard = match report.standard {
-            BroadcastStandard::AtscPsip => "ATSC (PSIP detected)",
+            BroadcastStandard::AtscPsip => "ATSC 1.0 (TVCT/PSIP detected)",
+            BroadcastStandard::AtscCablePsip => "ATSC Cable PSIP (CVCT detected)",
             BroadcastStandard::DvbSi => "DVB (SI detected)",
             BroadcastStandard::Isdb => "ISDB (TSDuck detected)",
             BroadcastStandard::Scte => "SCTE (TSDuck detected)",
             BroadcastStandard::Dtmb => "DTMB (TSDuck detected)",
             BroadcastStandard::Unknown => "Unknown",
         };
-        ui.heading("Transport Stream");
+        let delivery_hint = match report.standard {
+            BroadcastStandard::AtscPsip => format!(
+                "ATSC terrestrial / {} (signalled, not RF-verified)",
+                report.signalled_modulation.label()
+            ),
+            BroadcastStandard::AtscCablePsip => format!(
+                "J.83 Annex B / {} (signalled, not RF-verified)",
+                report.signalled_modulation.label()
+            ),
+            _ => "Not available from static TS".to_owned(),
+        };
         let mut rows = vec![
             ("Packet format", format!("{:?}", report.format)),
-            ("Standard", standard.to_owned()),
+            ("Standard / signalling", standard.to_owned()),
+            ("Delivery hint", delivery_hint),
             ("TS packets", format!("{} packets", report.packets)),
             (
                 "Malformed packets",
@@ -1388,107 +1580,168 @@ impl TsanApp {
             ]);
         }
         let summary = format_information_rows(rows);
-        readonly_text_block(ui, "analyzer-summary-text", &summary);
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt("overview-programs-scroll")
-            .max_height(320.0)
+        egui::Frame::group(ui.style())
+            .inner_margin(8.0)
             .show(ui, |ui| {
-                egui::CollapsingHeader::new(format!("Programs ({})", report.programs.len()))
-                    .default_open(true)
+                ui.set_min_width(section_content_width);
+                ui.heading("Transport Stream");
+                readonly_text_block(ui, "analyzer-summary-text", &summary);
+            });
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style())
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(section_content_width);
+                ArrowScrollArea::vertical()
+                    .id_salt("overview-programs-scroll")
+                    .min_scrolled_height(PROGRAMS_MIN_SCROLLED_HEIGHT)
+                    .max_height(320.0)
                     .show(ui, |ui| {
-                        if report.programs.is_empty() {
-                            ui.label("No valid PAT/PMT found.");
-                        }
-                        for (number, program) in &report.programs {
-                            egui::CollapsingHeader::new(format!("Program {number}"))
-                                .id_salt(number)
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    let mut details = format!(
-                                        "PMT PID: 0x{:04X}\nPCR PID: {}\n",
-                                        program.pmt_pid,
-                                        program.pcr_pid.map_or_else(
-                                            || "Unknown".to_owned(),
-                                            |pid| format!("0x{pid:04X}")
-                                        )
-                                    );
-                                    for (pid, stream) in &program.streams {
-                                        let _ = writeln!(
-                                            details,
-                                            "Stream PID 0x{pid:04X}: {} (type 0x{:02X})",
-                                            stream.name_for_standard(report.standard),
-                                            stream.stream_type
+                        egui::CollapsingHeader::new(format!(
+                            "Programs ({})",
+                            report.programs.len()
+                        ))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            if report.programs.is_empty() {
+                                ui.label("No valid PAT/PMT found.");
+                            }
+                            for (number, program) in &report.programs {
+                                egui::CollapsingHeader::new(format!("Program {number}"))
+                                    .id_salt(number)
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        let mut details = format!(
+                                            "PMT PID: 0x{:04X}
+PCR PID: {}
+",
+                                            program.pmt_pid,
+                                            program.pcr_pid.map_or_else(
+                                                || "Unknown".to_owned(),
+                                                |pid| format!("0x{pid:04X}")
+                                            )
                                         );
-                                    }
-                                    if program.streams.is_empty() {
-                                        details.push_str("No elementary streams found.");
-                                    }
-                                    readonly_text_block(ui, "analyzer-program-text", &details);
-                                });
-                        }
+                                        for (pid, stream) in &program.streams {
+                                            let _ = writeln!(
+                                                details,
+                                                "Stream PID 0x{pid:04X}: {} (type 0x{:02X})",
+                                                stream.name_for_standard(report.standard),
+                                                stream.stream_type
+                                            );
+                                        }
+                                        if program.streams.is_empty() {
+                                            details.push_str("No elementary streams found.");
+                                        }
+                                        readonly_text_block(ui, "analyzer-program-text", &details);
+                                    });
+                            }
+                        });
                     });
             });
-        ui.separator();
-        ui.heading(format!("PIDs ({})", report.pids.len()));
-        ui.horizontal(|ui| {
-            ui.label("Filter:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.analyzer_pid_filter)
-                    .hint_text("PID, hex or decimal")
-                    .desired_width(180.0),
-            );
-        });
-        let needle = self.analyzer_pid_filter.trim().to_ascii_lowercase();
-        let mut visible = 0;
-        egui::ScrollArea::vertical()
-            .id_salt("overview-pids-scroll")
-            .max_height(280.0)
-            .show(ui, |ui| {
-                for (pid, stats) in &report.pids {
-                    let role = if *pid == 0 {
-                        "PAT"
-                    } else if *pid == 0x1fff {
-                        "Null"
-                    } else if *pid == 0x1ffb {
-                        "ATSC PSIP"
-                    } else if report
+        ui.add_space(8.0);
+        let pid_rows = report
+            .pids
+            .iter()
+            .map(|(pid, stats)| {
+                let role = if *pid == 0 {
+                    "PAT"
+                } else if *pid == 0x1fff {
+                    "Null"
+                } else if *pid == 0x1ffb {
+                    "ATSC PSIP"
+                } else if report
+                    .programs
+                    .values()
+                    .any(|program| program.pmt_pid == *pid)
+                {
+                    "PMT"
+                } else {
+                    report
                         .programs
                         .values()
-                        .any(|program| program.pmt_pid == *pid)
-                    {
-                        "PMT"
-                    } else {
-                        report
-                            .programs
-                            .values()
-                            .find_map(|program| program.streams.get(pid))
-                            .map_or("Other", |stream| stream.name_for_standard(report.standard))
-                    };
-                    let matches = needle.is_empty()
-                        || format!("0x{pid:04x}").contains(&needle)
-                        || format!("0x{pid:x}").contains(&needle)
-                        || pid.to_string().contains(&needle)
-                        || role.to_ascii_lowercase().contains(&needle);
-                    if !matches {
-                        continue;
-                    }
-                    visible += 1;
-                    ui.selectable_value(
-                        &mut self.analyzer_selected_pid,
-                        Some(*pid),
-                        format!("0x{pid:04X}  {role}  ({} packets)", stats.packets),
-                    );
-                }
-                if visible == 0 {
-                    ui.label("No PIDs match the filter.");
-                }
-            });
+                        .find_map(|program| program.streams.get(pid))
+                        .map_or("Other", |stream| stream.name_for_standard(report.standard))
+                };
+                (
+                    *pid,
+                    role,
+                    format!("0x{pid:04X}  {role}  ({} packets)", stats.packets),
+                )
+            })
+            .collect::<Vec<_>>();
+        let needle = self.analyzer_pid_filter.trim().to_ascii_lowercase();
+        let visible_pid_rows = pid_rows
+            .iter()
+            .filter(|(pid, role, _)| {
+                needle.is_empty()
+                    || format!("0x{pid:04x}").contains(&needle)
+                    || format!("0x{pid:x}").contains(&needle)
+                    || pid.to_string().contains(&needle)
+                    || role.to_ascii_lowercase().contains(&needle)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let pid_font = egui::TextStyle::Body.resolve(ui.style());
+        let pid_content_width = ui.fonts_mut(|fonts| {
+            pid_rows
+                .iter()
+                .map(|(_, _, label)| {
+                    fonts
+                        .layout_no_wrap(label.clone(), pid_font.clone(), egui::Color32::WHITE)
+                        .size()
+                        .x
+                })
+                .fold(240.0_f32, f32::max)
+                + 12.0
+        });
+        let pid_block_width = (pid_content_width + 50.0)
+            .max(280.0)
+            .min((viewport_width - 18.0).max(1.0));
+        let pid_row_height = ui.spacing().interact_size.y.max(22.0);
+        let pid_list_height =
+            (visible_pid_rows.len().max(1) as f32 * pid_row_height + 20.0).clamp(56.0, 420.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(pid_block_width, pid_list_height + 92.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(pid_block_width);
+                egui::Frame::group(ui.style())
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.heading(format!("PIDs ({})", report.pids.len()));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Filter:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.analyzer_pid_filter)
+                                    .hint_text("PID, hex or decimal")
+                                    .desired_width((pid_block_width - 72.0).clamp(80.0, 180.0)),
+                            );
+                        });
+                        ArrowScrollArea::both()
+                            .id_salt("overview-pids-scroll")
+                            .max_width((pid_block_width - 16.0).max(1.0))
+                            .max_height(pid_list_height)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_min_width(pid_content_width);
+                                for (pid, _, label) in &visible_pid_rows {
+                                    ui.selectable_value(
+                                        &mut self.analyzer_selected_pid,
+                                        Some(*pid),
+                                        label.as_str(),
+                                    );
+                                }
+                                if visible_pid_rows.is_empty() {
+                                    ui.label("No PIDs match the filter.");
+                                }
+                            });
+                    });
+            },
+        );
         if let Some(pid) = self.analyzer_selected_pid
             && let Some(stats) = report.pids.get(&pid)
         {
-            ui.separator();
-            ui.heading(format!("PID 0x{pid:04X}"));
+            ui.add_space(8.0);
             let details = format_information_rows([
                 ("Packets", stats.packets.to_string()),
                 ("Payload packets", stats.payload_packets.to_string()),
@@ -1505,7 +1758,13 @@ impl TsanApp {
                     ),
                 ),
             ]);
-            readonly_text_block(ui, "analyzer-pid-details", &details);
+            egui::Frame::group(ui.style())
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(section_content_width);
+                    ui.heading(format!("PID 0x{pid:04X}"));
+                    readonly_text_block(ui, "analyzer-pid-details", &details);
+                });
         }
     }
 
@@ -1514,27 +1773,39 @@ impl TsanApp {
             ui.label("Import a transport stream to analyze this page.");
             return;
         };
-        let Some(document) = self.documents.get(index) else {
-            return;
-        };
-        if let Some(error) = &document.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-            return;
+        let mut jump_to_packet = None;
+        {
+            let Some(document) = self.documents.get_mut(index) else {
+                return;
+            };
+            if let Some(error) = &document.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+                return;
+            }
+            let Some(report) = document.report.as_ref() else {
+                ui.spinner();
+                ui.label("Analyzing transport stream...");
+                return;
+            };
+            let state = &mut document.view_state;
+            match view {
+                AnalyzerView::Overview => {}
+                AnalyzerView::PsiSiTree => analysis_views::psi_si_tree(ui, report, state),
+                AnalyzerView::Packets => analysis_views::packets(ui, &document.path, report, state),
+                AnalyzerView::Tr101290 => {
+                    jump_to_packet = analysis_views::tr101290(ui, report, state);
+                }
+                AnalyzerView::Bitrate => analysis_views::bitrate(ui, report, state),
+                AnalyzerView::Timestamps => analysis_views::timestamps(ui, report, state),
+                AnalyzerView::Gop => analysis_views::gop(ui, report, state),
+            }
         }
-        let Some(report) = document.report.as_ref() else {
-            ui.spinner();
-            ui.label("Analyzing transport stream...");
-            return;
-        };
-        let state = &mut self.analysis_view_state;
-        match view {
-            AnalyzerView::Overview => {}
-            AnalyzerView::PsiSiTree => analysis_views::psi_si_tree(ui, report, state),
-            AnalyzerView::Packets => analysis_views::packets(ui, &document.path, report, state),
-            AnalyzerView::Tr101290 => analysis_views::tr_101_290(ui, report, state),
-            AnalyzerView::Bitrate => analysis_views::bitrate(ui, report, state),
-            AnalyzerView::Timestamps => analysis_views::timestamps(ui, report, state),
-            AnalyzerView::Gop => analysis_views::gop(ui, report, state),
+        if let Some(packet) = jump_to_packet {
+            if let Some(document) = self.documents.get_mut(index) {
+                document.view_state.packet_start = packet;
+                document.view_state.selected_packet = Some(packet);
+            }
+            self.analyzer_view = AnalyzerView::Packets;
         }
     }
 
@@ -1593,27 +1864,45 @@ impl TsanApp {
     }
 
     fn document_tabs(&mut self, ui: &mut egui::Ui) {
-        if self.documents.is_empty() {
+        if self.visible_documents.is_empty() {
             return;
         }
+        let document_count = self.documents.len();
         let mut selected = None;
         let mut closed = None;
-        egui::ScrollArea::horizontal()
+        let mut reordered = None;
+        ArrowScrollArea::horizontal()
             .id_salt("document-tabs-scroll")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (index, document) in self.documents.iter().enumerate() {
+                    for index in self.visible_documents.iter().copied() {
+                        let document = &self.documents[index];
                         let name = document
                             .path
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_else(|| document.path.display().to_string());
                         ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(self.selected_document == Some(index), name)
-                                .on_hover_text(document.path.display().to_string())
-                                .clicked()
-                            {
+                            let response = ui
+                                .add(
+                                    egui::Button::selectable(
+                                        self.selected_document == Some(index),
+                                        name,
+                                    )
+                                    .sense(egui::Sense::click_and_drag()),
+                                )
+                                .on_hover_text(document.path.display().to_string());
+                            response.dnd_set_drag_payload(DocumentDrag { index });
+                            if let Some(order) = document_reorder_from_drop(
+                                ui,
+                                &response,
+                                index,
+                                document_count,
+                                DocumentDropAxis::Horizontal,
+                            ) {
+                                reordered = Some(order);
+                            }
+                            if response.clicked() {
                                 selected = Some(index);
                             }
                             if ui.small_button("×").on_hover_text("Close TS").clicked() {
@@ -1627,11 +1916,14 @@ impl TsanApp {
         ui.separator();
         if let Some(index) = closed {
             self.close_document(index);
+        } else if let Some((from, to)) = reordered {
+            self.reorder_document(from, to);
         } else if let Some(index) = selected {
             self.selected_document = Some(index);
             if !self.visible_documents.contains(&index) {
                 self.visible_documents.clear();
                 self.visible_documents.push(index);
+                self.pane_widths = equal_pane_weights(1);
             }
             self.analyzer_selected_pid = None;
             self.select_page(Page::Analyzer);
@@ -1647,61 +1939,89 @@ impl TsanApp {
         }
 
         let count = visible.len();
-        let height = ui.available_height();
+        if self.pane_widths.len() != count {
+            self.pane_widths = equal_pane_weights(count);
+            self.pane_resize_drag = None;
+        }
+        let height = ui.available_height().max(320.0);
         let handle_width = 12.0;
-        let usable =
-            (ui.available_width() - handle_width * (count - 1) as f32).max(count as f32 * 220.0);
-        let weight_sum: f32 = self.pane_widths[..count].iter().sum();
+        let viewport_width = ui.available_width();
+        let content_width =
+            (viewport_width - handle_width * (count - 1) as f32).max(count as f32 * 180.0);
+        let weight_sum: f32 = self.pane_widths.iter().sum();
         let widths = (0..count)
-            .map(|pane| usable * self.pane_widths[pane] / weight_sum.max(f32::EPSILON))
+            .map(|pane| content_width * self.pane_widths[pane] / weight_sum.max(f32::EPSILON))
             .collect::<Vec<_>>();
         let focused = self.selected_document;
-        let mut dragged = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("analyzer-panes-horizontal")
+        let mut resize_started = None;
+        let mut resize_delta = None;
+        let mut resize_stopped = false;
+        ArrowScrollArea::both()
+            .id_salt("analyzer-panes-outer-scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     for (pane, index) in visible.iter().copied().enumerate() {
-                        ui.allocate_ui(egui::vec2(widths[pane], height), |ui| {
-                            ui.set_width(widths[pane]);
-                            self.selected_document = Some(index);
-                            ui.push_id(("analyzer-pane", index), |ui| self.analyzer_page(ui));
-                        });
+                        let (pane_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(widths[pane], height),
+                            egui::Sense::hover(),
+                        );
+                        let mut pane_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(pane_rect)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        pane_ui.set_clip_rect(pane_rect);
+                        egui::Frame::group(pane_ui.style())
+                            .inner_margin(egui::Margin::same(8))
+                            .show(&mut pane_ui, |ui| {
+                                ui.set_width((widths[pane] - 18.0).max(120.0));
+                                ui.set_min_height((height - 18.0).max(240.0));
+                                self.selected_document = Some(index);
+                                ui.push_id(("analyzer-pane", index), |ui| self.analyzer_page(ui));
+                            });
+
                         if pane + 1 < count {
-                            let (rect, response) = ui.allocate_exact_size(
-                                egui::vec2(handle_width, height),
-                                egui::Sense::drag(),
-                            );
-                            let response = response
-                                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                                .on_hover_text("Drag to resize analyzer panes");
-                            ui.painter().rect_filled(
-                                rect,
-                                2.0,
-                                ui.visuals().widgets.inactive.bg_fill,
-                            );
-                            ui.painter().vline(
-                                rect.center().x,
-                                rect.y_range().shrink(8.0),
-                                ui.visuals().widgets.noninteractive.fg_stroke,
-                            );
-                            if response.dragged() {
-                                dragged = Some(pane);
+                            let response = ResizeHandle::horizontal(height)
+                                .thickness(handle_width)
+                                .inset(8.0)
+                                .filled(true)
+                                .hover_text("Drag to resize analyzer panes")
+                                .show(ui);
+                            if response.drag_started_by(egui::PointerButton::Primary) {
+                                resize_started = Some(pane);
+                            }
+                            if let Some(delta) = response.total_drag_delta() {
+                                resize_delta = Some((pane, delta.x));
+                            }
+                            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                                resize_stopped = true;
                             }
                         }
                     }
                 });
             });
         self.selected_document = focused;
-        if let Some(pane) = dragged {
-            let delta = ui.ctx().input(|input| input.pointer.delta().x) / usable;
-            let lower = 220.0 / usable;
-            let left = self.pane_widths[pane];
-            let right = self.pane_widths[pane + 1];
-            let updated = (left + delta).clamp(lower, left + right - lower);
+        if let Some(pane) = resize_started {
+            self.pane_resize_drag = Some(PaneResizeDrag {
+                divider: pane,
+                left: self.pane_widths[pane],
+                right: self.pane_widths[pane + 1],
+            });
+        }
+        if let Some((pane, delta_points)) = resize_delta
+            && let Some(drag) = self.pane_resize_drag.filter(|drag| drag.divider == pane)
+        {
+            let pair = drag.left + drag.right;
+            let lower = (160.0 / content_width).min(pair * 0.45);
+            let updated = (drag.left + delta_points / content_width).clamp(lower, pair - lower);
             self.pane_widths[pane] = updated;
-            self.pane_widths[pane + 1] = left + right - updated;
+            self.pane_widths[pane + 1] = pair - updated;
             ui.ctx().request_repaint();
+        }
+        if resize_stopped {
+            self.pane_resize_drag = None;
         }
     }
 
@@ -1735,7 +2055,7 @@ impl TsanApp {
                 }
 
                 ui.add_space(12.0);
-                egui::ScrollArea::vertical()
+                ArrowScrollArea::vertical()
                     .id_salt("player-details-scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1852,18 +2172,11 @@ impl TsanApp {
             }
         }
 
-        let (handle, response) =
-            ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::drag());
-        ui.painter().line_segment(
-            [
-                egui::pos2(handle.left() + 24.0, handle.center().y),
-                egui::pos2(handle.right() - 24.0, handle.center().y),
-            ],
-            egui::Stroke::new(3.0, ui.visuals().widgets.noninteractive.fg_stroke.color),
-        );
-        if response.hovered() || response.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        }
+        let response = ResizeHandle::vertical(width)
+            .thickness(8.0)
+            .inset(24.0)
+            .hover_text("Drag to resize the video output")
+            .show(ui);
         if response.dragged() {
             self.embedded_video_height = Some(
                 (height + ui.input(|input| input.pointer.delta().y)).clamp(180.0, maximum_height),
@@ -2046,7 +2359,7 @@ impl TsanApp {
             .map(LogEntry::dump_line)
             .collect::<Vec<_>>()
             .join("\n");
-        egui::ScrollArea::both()
+        ArrowScrollArea::both()
             .id_salt("log-scroll")
             .auto_shrink([false, false])
             .stick_to_bottom(true)
@@ -2097,6 +2410,89 @@ fn include_popup_rectangle(target: &mut Option<egui::Rect>, rectangle: egui::Rec
     });
 }
 
+fn maximum_comparison_documents(window_width: f32) -> usize {
+    if !window_width.is_finite() {
+        return BASELINE_COMPARISON_COUNT;
+    }
+    let scaled = (window_width.max(0.0) / BASELINE_COMPARISON_WINDOW_WIDTH
+        * BASELINE_COMPARISON_COUNT as f32)
+        .floor() as usize;
+    scaled.max(BASELINE_COMPARISON_COUNT)
+}
+
+fn equal_pane_weights(count: usize) -> Vec<f32> {
+    if count == 0 {
+        Vec::new()
+    } else {
+        vec![1.0 / count as f32; count]
+    }
+}
+
+fn remap_moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && index > from && index <= to {
+        index - 1
+    } else if to < from && index >= to && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
+fn document_drop_index(from: usize, target: usize, after: bool, count: usize) -> usize {
+    let insertion = target.saturating_add(usize::from(after)).min(count);
+    insertion
+        .saturating_sub(usize::from(from < insertion))
+        .min(count.saturating_sub(1))
+}
+
+fn document_reorder_from_drop(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    target: usize,
+    count: usize,
+    axis: DocumentDropAxis,
+) -> Option<(usize, usize)> {
+    let payload = response.dnd_hover_payload::<DocumentDrag>()?;
+    let pointer = ui
+        .ctx()
+        .pointer_hover_pos()
+        .unwrap_or(response.rect.center());
+    let after = match axis {
+        DocumentDropAxis::Horizontal => pointer.x >= response.rect.center().x,
+        DocumentDropAxis::Vertical => pointer.y >= response.rect.center().y,
+    };
+    let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+    match axis {
+        DocumentDropAxis::Horizontal => {
+            let x = if after {
+                response.rect.right()
+            } else {
+                response.rect.left()
+            };
+            ui.painter().vline(x, response.rect.y_range(), stroke);
+        }
+        DocumentDropAxis::Vertical => {
+            let y = if after {
+                response.rect.bottom()
+            } else {
+                response.rect.top()
+            };
+            ui.painter().hline(response.rect.x_range(), y, stroke);
+        }
+    }
+    let released = response.dnd_release_payload::<DocumentDrag>()?;
+    let from = released.index;
+    debug_assert_eq!(from, payload.index);
+    let to = document_drop_index(from, target, after, count);
+    (from != to).then_some((from, to))
+}
+
+fn remaining_document_index(closed_index: usize, remaining_documents: usize) -> Option<usize> {
+    (remaining_documents > 0).then(|| closed_index.min(remaining_documents - 1))
+}
+
 fn valid_record_time(value: &str) -> bool {
     let mut fields = value.split(':');
     let (Some(hours), Some(minutes), Some(seconds), None) =
@@ -2111,21 +2507,59 @@ fn valid_record_time(value: &str) -> bool {
 
 fn format_information_rows(rows: impl IntoIterator<Item = (&'static str, String)>) -> String {
     rows.into_iter()
-        .map(|(label, value)| format!("{label:<18}{value}"))
+        .map(|(label, value)| format!("{label}\t{value}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+fn semantic_item_color(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(225, 228, 235)
+    } else {
+        egui::Color32::from_rgb(45, 49, 58)
+    }
+}
+
+fn semantic_value_color(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(105, 205, 255)
+    } else {
+        egui::Color32::from_rgb(0, 86, 150)
+    }
+}
+
 fn readonly_text_block(ui: &mut egui::Ui, id_salt: &'static str, text: &str) -> egui::Response {
-    let mut buffer = text;
-    ui.add(
-        egui::TextEdit::multiline(&mut buffer)
-            .id_salt(id_salt)
-            .font(egui::TextStyle::Monospace)
-            .desired_width(f32::INFINITY)
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin::ZERO),
-    )
+    ui.push_id(id_salt, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for line in text.lines() {
+                let fields = line.split_once('\t').or_else(|| line.split_once(": "));
+                if let Some((item, value)) = fields {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{item}:"))
+                                .monospace()
+                                .color(semantic_item_color(ui))
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(value)
+                                .monospace()
+                                .color(semantic_value_color(ui)),
+                        );
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new(line)
+                            .monospace()
+                            .color(semantic_value_color(ui)),
+                    );
+                }
+            }
+        })
+        .response
+    })
+    .inner
 }
 
 fn readonly_log_text(ui: &mut egui::Ui, id_salt: &'static str, text: &str) -> egui::Response {
@@ -2249,6 +2683,7 @@ impl eframe::App for TsanApp {
         self.receive_snapshots();
         let context = root_ui.ctx().clone();
         context.request_repaint_after(Duration::from_millis(50));
+        self.comparison_limit = maximum_comparison_documents(context.content_rect().width());
 
         let popup_rectangle = self.application_header(root_ui, frame);
         self.error_banner(root_ui);
@@ -2660,7 +3095,51 @@ mod tests {
 
     use eframe::egui;
 
-    use super::{format_playback_time, physical_video_exclusion, valid_record_time};
+    use super::{
+        document_drop_index, equal_pane_weights, format_playback_time,
+        maximum_comparison_documents, physical_video_exclusion, remaining_document_index,
+        remap_moved_index, valid_record_time,
+    };
+
+    #[test]
+    fn closing_last_document_leaves_empty_selection() {
+        assert_eq!(remaining_document_index(0, 0), None);
+        assert_eq!(remaining_document_index(2, 2), Some(1));
+        assert_eq!(remaining_document_index(0, 2), Some(0));
+    }
+
+    #[test]
+    fn comparison_limit_scales_from_the_three_pane_baseline() {
+        assert_eq!(maximum_comparison_documents(1280.0), 3);
+        assert_eq!(maximum_comparison_documents(1920.0), 3);
+        assert_eq!(maximum_comparison_documents(2560.0), 4);
+        assert_eq!(maximum_comparison_documents(3840.0), 6);
+    }
+
+    #[test]
+    fn document_move_remaps_every_index() {
+        assert_eq!(remap_moved_index(2, 2, 0), 0);
+        assert_eq!(remap_moved_index(0, 2, 0), 1);
+        assert_eq!(remap_moved_index(1, 2, 0), 2);
+        assert_eq!(remap_moved_index(0, 0, 2), 2);
+        assert_eq!(remap_moved_index(1, 0, 2), 0);
+        assert_eq!(remap_moved_index(2, 0, 2), 1);
+    }
+
+    #[test]
+    fn document_drop_uses_before_and_after_halves() {
+        assert_eq!(document_drop_index(0, 1, true, 3), 1);
+        assert_eq!(document_drop_index(2, 0, false, 3), 0);
+        assert_eq!(document_drop_index(1, 2, true, 3), 2);
+        assert_eq!(document_drop_index(1, 1, false, 3), 1);
+    }
+
+    #[test]
+    fn pane_weights_are_equal_for_any_supported_count() {
+        assert_eq!(equal_pane_weights(0), Vec::<f32>::new());
+        assert_eq!(equal_pane_weights(3), vec![1.0 / 3.0; 3]);
+        assert_eq!(equal_pane_weights(4), vec![0.25; 4]);
+    }
 
     #[test]
     fn playback_time_uses_clock_format() {

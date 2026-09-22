@@ -13,6 +13,7 @@ pub struct VideoMetadata {
 pub(crate) struct VideoProbe {
     stream_type: u8,
     sample: Vec<u8>,
+    random_access_tail: Vec<u8>,
     dimensions: Option<(u32, u32)>,
 }
 
@@ -21,6 +22,7 @@ impl VideoProbe {
         Self {
             stream_type,
             sample: Vec::new(),
+            random_access_tail: Vec::new(),
             dimensions: None,
         }
     }
@@ -29,15 +31,25 @@ impl VideoProbe {
         self.stream_type
     }
 
-    pub(crate) fn push_packet(&mut self, payload: &[u8], unit_start: bool) {
+    pub(crate) fn push_packet(&mut self, payload: &[u8], unit_start: bool) -> bool {
         let mut elementary = payload;
         if unit_start && payload.len() >= 9 && payload.starts_with(&[0, 0, 1]) {
             let header_end = 9 + usize::from(payload[8]);
             let Some(data) = payload.get(header_end..) else {
-                return;
+                return false;
             };
             elementary = data;
         }
+
+        let mut scan = Vec::with_capacity(self.random_access_tail.len() + elementary.len());
+        scan.extend_from_slice(&self.random_access_tail);
+        scan.extend_from_slice(elementary);
+        let random_access = contains_random_access_nal(self.stream_type, &scan);
+        let tail_start = scan.len().saturating_sub(4);
+        self.random_access_tail.clear();
+        self.random_access_tail
+            .extend_from_slice(&scan[tail_start..]);
+
         if self.dimensions.is_none() {
             self.sample.extend_from_slice(elementary);
             if self.sample.len() >= MAX_SAMPLE_BYTES {
@@ -48,6 +60,7 @@ impl VideoProbe {
                 }
             }
         }
+        random_access
     }
 
     pub(crate) fn finish(mut self) -> Option<VideoMetadata> {
@@ -101,14 +114,31 @@ fn native_sps(stream_type: u8, data: &[u8]) -> Option<tsan_tsduck_sys::VideoSps>
             0x24 => nal.first().is_some_and(|byte| (byte >> 1) & 0x3f == 33),
             _ => false,
         };
-        if expected {
-            if let Some(metadata) = tsan_tsduck_sys::parse_sps(stream_type, nal) {
-                return Some(metadata);
-            }
+        if expected && let Some(metadata) = tsan_tsduck_sys::parse_sps(stream_type, nal) {
+            return Some(metadata);
         }
         offset = next.map_or(data.len(), |(_, start)| start);
     }
     None
+}
+
+fn contains_random_access_nal(stream_type: u8, data: &[u8]) -> bool {
+    let mut offset = 0;
+    while let Some((_, nal_start)) = next_start_code(data, offset) {
+        let Some(&header) = data.get(nal_start) else {
+            return false;
+        };
+        let random_access = match stream_type {
+            0x1b => header & 0x1f == 5,
+            0x24 => (16..=23).contains(&((header >> 1) & 0x3f)),
+            _ => false,
+        };
+        if random_access {
+            return true;
+        }
+        offset = nal_start.saturating_add(1);
+    }
+    false
 }
 
 fn dimensions_in_annex_b(stream_type: u8, data: &[u8]) -> Option<(u32, u32)> {
@@ -173,7 +203,7 @@ impl<'a> Bits<'a> {
                 return None;
             }
         }
-        Some(((1_u32 << zeros) - 1).checked_add(self.read(zeros)?)?)
+        ((1_u32 << zeros) - 1).checked_add(self.read(zeros)?)
     }
 
     fn se(&mut self) -> Option<i64> {
@@ -363,4 +393,34 @@ fn h264_sps(nal: &[u8]) -> Option<(u32, u32)> {
             .checked_add(crop_bottom)?
             .checked_mul(crop_unit_y)?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h264_idr_and_h265_irap_are_random_access_points() {
+        assert!(contains_random_access_nal(0x1b, &[0, 0, 1, 0x65, 0x88]));
+        assert!(!contains_random_access_nal(0x1b, &[0, 0, 1, 0x41, 0x88]));
+        assert!(contains_random_access_nal(
+            0x24,
+            &[0, 0, 1, 19 << 1, 0x01, 0x88]
+        ));
+        assert!(contains_random_access_nal(
+            0x24,
+            &[0, 0, 1, 21 << 1, 0x01, 0x88]
+        ));
+        assert!(!contains_random_access_nal(
+            0x24,
+            &[0, 0, 1, 1 << 1, 0x01, 0x88]
+        ));
+    }
+
+    #[test]
+    fn video_probe_detects_start_code_split_across_packets() {
+        let mut probe = VideoProbe::new(0x1b);
+        assert!(!probe.push_packet(&[0x11, 0x00, 0x00], false));
+        assert!(probe.push_packet(&[0x01, 0x65, 0x88], false));
+    }
 }

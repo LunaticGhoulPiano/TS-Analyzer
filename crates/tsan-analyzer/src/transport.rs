@@ -11,16 +11,39 @@ use crate::video::{VideoMetadata, VideoProbe};
 pub enum BroadcastStandard {
     Unknown,
     AtscPsip,
+    AtscCablePsip,
     DvbSi,
     Isdb,
     Scte,
     Dtmb,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SignalledModulation {
+    #[default]
+    Unknown,
+    Vsb8,
+    Qam64,
+    Qam256,
+}
+
+impl SignalledModulation {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Vsb8 => "8-VSB",
+            Self::Qam64 => "64-QAM",
+            Self::Qam256 => "256-QAM",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AnalysisReport {
     pub format: TransportStreamFormat,
+    pub stream_start_offset: u64,
     pub standard: BroadcastStandard,
+    pub signalled_modulation: SignalledModulation,
     pub packets: u64,
     pub malformed_packets: u64,
     pub trailing_bytes: u64,
@@ -34,6 +57,40 @@ pub struct AnalysisReport {
     pub clock_points: Vec<ClockPoint>,
     pub random_access_points: Vec<(u64, u16)>,
     pub tables: BTreeMap<(u16, u8), TableSummary>,
+    pub bitrate_windows: Vec<BitrateWindow>,
+    pub section_events: Vec<SectionEvent>,
+    pub sync_byte_errors: u64,
+    pub sync_loss_events: u64,
+    pub tr_events: Vec<TrEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrEvent {
+    pub packet_index: u64,
+    pub pid: u16,
+    pub indicator: &'static str,
+    pub detail: String,
+    pub exact_packet: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SectionEvent {
+    pub packet_index: u64,
+    pub pid: u16,
+    pub table_id: u8,
+    pub extension: u16,
+    pub version: u8,
+    pub section_number: u8,
+    pub last_section_number: u8,
+}
+
+pub const BITRATE_WINDOW_PACKETS: u64 = 1024;
+
+#[derive(Clone, Debug, Default)]
+pub struct BitrateWindow {
+    pub first_packet: u64,
+    pub packet_count: u32,
+    pub pid_packets: BTreeMap<u16, u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,6 +116,7 @@ pub struct TableSummary {
     pub section_number: Option<u8>,
     pub last_section_number: Option<u8>,
     pub first_section: Vec<u8>,
+    pub instances: BTreeMap<(u16, u8, u8), Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -83,6 +141,12 @@ pub struct MediaInformation {
 }
 
 impl AnalysisReport {
+    pub fn packet_offset(&self, packet_index: u64) -> u64 {
+        self.stream_start_offset
+            + packet_index * self.format.packet_size() as u64
+            + u64::from(self.format == TransportStreamFormat::M2ts192) * 4
+    }
+
     pub fn media_information(&self) -> MediaInformation {
         let mut video_codecs = BTreeSet::new();
         let mut audio_codecs = BTreeSet::new();
@@ -124,6 +188,7 @@ impl AnalysisReport {
 #[derive(Clone, Debug, Default)]
 pub struct PidReport {
     pub packets: u64,
+    pub first_packet: Option<u64>,
     pub payload_packets: u64,
     pub transport_errors: u64,
     pub continuity_errors: u64,
@@ -131,6 +196,9 @@ pub struct PidReport {
     pub scrambled_packets: u64,
     pub pcr_samples: u64,
     pub max_pcr_gap_27mhz: Option<u64>,
+    pub pcr_repetition_errors: u64,
+    pub pcr_accuracy_errors: u64,
+    pub pcr_discontinuity_errors: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -156,14 +224,16 @@ impl StreamReport {
 
     pub const fn is_audio_for_standard(self, standard: BroadcastStandard) -> bool {
         self.is_audio()
-            || (matches!(standard, BroadcastStandard::AtscPsip)
-                && matches!(self.stream_type, 0x81 | 0x87))
+            || (matches!(
+                standard,
+                BroadcastStandard::AtscPsip | BroadcastStandard::AtscCablePsip
+            ) && matches!(self.stream_type, 0x81 | 0x87))
     }
 
     pub const fn name_for_standard(self, standard: BroadcastStandard) -> &'static str {
         match (standard, self.stream_type) {
-            (BroadcastStandard::AtscPsip, 0x81) => "AC-3",
-            (BroadcastStandard::AtscPsip, 0x87) => "E-AC-3",
+            (BroadcastStandard::AtscPsip | BroadcastStandard::AtscCablePsip, 0x81) => "AC-3",
+            (BroadcastStandard::AtscPsip | BroadcastStandard::AtscCablePsip, 0x87) => "E-AC-3",
             _ => self.name(),
         }
     }
@@ -188,6 +258,8 @@ struct PidState {
     previous_counter: Option<u8>,
     previous_packet: Vec<u8>,
     previous_pcr: Option<u64>,
+    previous_pcr_packet: Option<u64>,
+    previous_pcr_interval: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,6 +359,7 @@ pub fn analyze_file(path: &Path) -> io::Result<AnalysisReport> {
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
     reader.seek(SeekFrom::Start(probe.stream_start_offset() as u64))?;
     let mut analyzer = Analyzer::new(probe.format());
+    analyzer.report.stream_start_offset = probe.stream_start_offset() as u64;
     #[cfg(feature = "native-tsduck")]
     let mut native = tsan_tsduck_sys::Session::new()
         .map_err(|error| io::Error::other(format!("TSDuck initialization failed: {error:?}")))?;
@@ -335,7 +408,10 @@ pub fn analyze_file(path: &Path) -> io::Result<AnalysisReport> {
             standards: snapshot.standards,
         });
         report.standard = match snapshot.standards {
-            flags if flags & 0x08 != 0 => BroadcastStandard::AtscPsip,
+            flags if flags & 0x08 != 0 => match report.standard {
+                BroadcastStandard::AtscCablePsip => BroadcastStandard::AtscCablePsip,
+                _ => BroadcastStandard::AtscPsip,
+            },
             flags if flags & 0x10 != 0 => BroadcastStandard::Isdb,
             flags if flags & 0x02 != 0 => BroadcastStandard::DvbSi,
             flags if flags & 0x80 != 0 => BroadcastStandard::Dtmb,
@@ -355,6 +431,33 @@ struct Analyzer {
     pending_pat: PatAssembly,
     active_pmts: BTreeMap<u16, TableKey>,
     pending_pmts: BTreeMap<u16, PmtAssembly>,
+    previous_sync_error: bool,
+}
+
+fn signalled_atsc_modulation(section: &[u8]) -> SignalledModulation {
+    if section.len() < 14 {
+        return SignalledModulation::Unknown;
+    }
+    let channels = usize::from(section[9]);
+    let payload_end = section.len().saturating_sub(4);
+    let mut detected = SignalledModulation::Unknown;
+    for index in 0..channels {
+        let modulation_offset = 10 + index * 32 + 17;
+        if modulation_offset >= payload_end {
+            break;
+        }
+        let candidate = match section[modulation_offset] {
+            0x02 => SignalledModulation::Qam64,
+            0x03 => SignalledModulation::Qam256,
+            0x04 => SignalledModulation::Vsb8,
+            _ => continue,
+        };
+        if detected != SignalledModulation::Unknown && detected != candidate {
+            return SignalledModulation::Unknown;
+        }
+        detected = candidate;
+    }
+    detected
 }
 
 impl Analyzer {
@@ -366,10 +469,8 @@ impl Analyzer {
                     .get(&pid)
                     .is_some_and(|stream| stream.is_video())
             });
-            if active {
-                if let Some(metadata) = probe.finish() {
-                    self.report.video_metadata.insert(pid, metadata);
-                }
+            if active && let Some(metadata) = probe.finish() {
+                self.report.video_metadata.insert(pid, metadata);
             }
         }
         self.report
@@ -378,15 +479,25 @@ impl Analyzer {
     fn new(format: TransportStreamFormat) -> Self {
         let mut sections = BTreeMap::new();
         sections.insert(0, SectionAssembler::default());
+        sections.insert(1, SectionAssembler::default());
+        sections.insert(2, SectionAssembler::default());
+        sections.insert(0x0013, SectionAssembler::default());
+        sections.insert(0x001e, SectionAssembler::default());
+        sections.insert(0x001f, SectionAssembler::default());
         sections.insert(0x0010, SectionAssembler::default());
         sections.insert(0x0011, SectionAssembler::default());
         sections.insert(0x0012, SectionAssembler::default());
         sections.insert(0x0014, SectionAssembler::default());
+        sections.insert(0x0023, SectionAssembler::default());
+        sections.insert(0x0024, SectionAssembler::default());
+        sections.insert(0x0029, SectionAssembler::default());
         sections.insert(0x1ffb, SectionAssembler::default());
         Self {
             report: AnalysisReport {
                 format,
+                stream_start_offset: 0,
                 standard: BroadcastStandard::Unknown,
+                signalled_modulation: SignalledModulation::Unknown,
                 packets: 0,
                 malformed_packets: 0,
                 trailing_bytes: 0,
@@ -400,6 +511,11 @@ impl Analyzer {
                 clock_points: Vec::new(),
                 random_access_points: Vec::new(),
                 tables: BTreeMap::new(),
+                bitrate_windows: Vec::new(),
+                section_events: Vec::new(),
+                sync_byte_errors: 0,
+                sync_loss_events: 0,
+                tr_events: Vec::new(),
             },
             states: BTreeMap::new(),
             sections,
@@ -408,25 +524,53 @@ impl Analyzer {
             pending_pat: PatAssembly::default(),
             active_pmts: BTreeMap::new(),
             pending_pmts: BTreeMap::new(),
+            previous_sync_error: false,
         }
     }
 
     fn packet(&mut self, ts: &[u8]) {
         self.report.packets += 1;
+        let index = self.report.packets - 1;
+        if index.is_multiple_of(BITRATE_WINDOW_PACKETS) {
+            self.report.bitrate_windows.push(BitrateWindow {
+                first_packet: index,
+                ..BitrateWindow::default()
+            });
+        }
+        if let Some(window) = self.report.bitrate_windows.last_mut() {
+            window.packet_count += 1;
+        }
         if ts[0] != 0x47 || ts[3] & 0x30 == 0 {
+            if ts[0] != 0x47 {
+                if self.previous_sync_error {
+                    self.report.sync_loss_events += 1;
+                }
+                self.previous_sync_error = true;
+                self.report.sync_byte_errors += 1;
+            }
             self.report.malformed_packets += 1;
             return;
         }
+        self.previous_sync_error = false;
         let pid = (u16::from(ts[1] & 0x1f) << 8) | u16::from(ts[2]);
         let counter = ts[3] & 0x0f;
         let has_payload = ts[3] & 0x10 != 0;
         let has_adaptation = ts[3] & 0x20 != 0;
+        if let Some(window) = self.report.bitrate_windows.last_mut() {
+            *window.pid_packets.entry(pid).or_default() += 1;
+        }
         if pid == 0x1fff {
             self.report.null_packets += 1;
         }
+        let is_program_pcr = self
+            .report
+            .programs
+            .values()
+            .any(|program| program.pcr_pid == Some(pid));
         let entry = self.report.pids.entry(pid).or_default();
         let state = self.states.entry(pid).or_default();
         entry.packets += 1;
+        entry.first_packet.get_or_insert(index);
         if ts[1] & 0x80 != 0 {
             entry.transport_errors += 1;
         }
@@ -442,14 +586,17 @@ impl Analyzer {
                 return;
             }
             if length > 0 {
-                if ts[5] & 0x40 != 0 && self.report.random_access_points.len() < 100_000 {
-                    self.report
-                        .random_access_points
-                        .push((self.report.packets - 1, pid));
+                if ts[5] & 0x40 != 0 {
+                    let point = (self.report.packets - 1, pid);
+                    if self.report.random_access_points.last().copied() != Some(point) {
+                        self.report.random_access_points.push(point);
+                    }
                 }
                 if ts[5] & 0x80 != 0 {
                     state.previous_counter = None;
                     state.previous_pcr = None;
+                    state.previous_pcr_packet = None;
+                    state.previous_pcr_interval = None;
                 }
                 if ts[5] & 0x10 != 0 {
                     if length < 7 {
@@ -464,23 +611,84 @@ impl Analyzer {
                     let extension = (u64::from(ts[10] & 1) << 8) | u64::from(ts[11]);
                     let pcr = base * 300 + extension;
                     entry.pcr_samples += 1;
-                    if self.report.clock_points.len() < 100_000 {
-                        self.report.clock_points.push(ClockPoint {
-                            packet_index: self.report.packets - 1,
-                            pid,
-                            kind: ClockKind::Pcr,
-                            ticks: pcr,
-                        });
+                    self.report.clock_points.push(ClockPoint {
+                        packet_index: self.report.packets - 1,
+                        pid,
+                        kind: ClockKind::Pcr,
+                        ticks: pcr,
+                    });
+                    if !is_program_pcr {
+                        state.previous_pcr = None;
+                        state.previous_pcr_packet = None;
+                        state.previous_pcr_interval = None;
                     }
-                    if let Some(previous) = state.previous_pcr {
+                    if let (Some(previous), Some(previous_packet)) =
+                        (state.previous_pcr, state.previous_pcr_packet)
+                    {
                         const WRAP: u64 = (1_u64 << 33) * 300;
                         let gap = (pcr + WRAP - previous) % WRAP;
-                        if gap < WRAP / 2 {
+                        let packet_gap = self.report.packets - 1 - previous_packet;
+                        if gap < WRAP / 2 && packet_gap > 0 {
                             entry.max_pcr_gap_27mhz =
                                 Some(entry.max_pcr_gap_27mhz.unwrap_or(0).max(gap));
+                            if gap >= 1_080_000 {
+                                entry.pcr_repetition_errors += 1;
+                                self.report.tr_events.push(TrEvent {
+                                    packet_index: index,
+                                    pid,
+                                    indicator: "PCR_repetition_error",
+                                    detail: format!(
+                                        "PCR interval {:.3} ms exceeds 40 ms",
+                                        gap as f64 / 27_000.0
+                                    ),
+                                    exact_packet: true,
+                                });
+                            }
+                            if gap > 2_700_000 {
+                                entry.pcr_discontinuity_errors += 1;
+                                self.report.tr_events.push(TrEvent {
+                                    packet_index: index,
+                                    pid,
+                                    indicator: "PCR_discontinuity_indicator_error",
+                                    detail: "PCR gap exceeds 100 ms without discontinuity flag"
+                                        .to_owned(),
+                                    exact_packet: true,
+                                });
+                            }
+                            if let Some((last_gap, last_packets)) = state.previous_pcr_interval {
+                                let predicted =
+                                    last_gap as f64 * packet_gap as f64 / last_packets as f64;
+                                if (gap as f64 - predicted).abs() >= 13.5 {
+                                    entry.pcr_accuracy_errors += 1;
+                                    self.report.tr_events.push(TrEvent {
+                                        packet_index: index,
+                                        pid,
+                                        indicator: "PCR_accuracy_error",
+                                        detail: format!(
+                                            "PCR deviation {:+.1} ns (limit +/-500 ns)",
+                                            (gap as f64 - predicted) * 1_000.0 / 27.0
+                                        ),
+                                        exact_packet: true,
+                                    });
+                                }
+                            }
+                            state.previous_pcr_interval = Some((gap, packet_gap));
+                        } else {
+                            entry.pcr_discontinuity_errors += 1;
+                            self.report.tr_events.push(TrEvent {
+                                packet_index: index,
+                                pid,
+                                indicator: "PCR_discontinuity_indicator_error",
+                                detail: "PCR moved backward without discontinuity flag".to_owned(),
+                                exact_packet: true,
+                            });
+                            state.previous_pcr_interval = None;
                         }
                     }
-                    state.previous_pcr = Some(pcr);
+                    if is_program_pcr {
+                        state.previous_pcr_packet = Some(self.report.packets - 1);
+                        state.previous_pcr = Some(pcr);
+                    }
                 }
             }
         }
@@ -488,7 +696,9 @@ impl Analyzer {
             return;
         }
         entry.payload_packets += 1;
-        if let Some(previous) = state.previous_counter {
+        if pid != 0x1fff
+            && let Some(previous) = state.previous_counter
+        {
             if counter == previous && state.previous_packet == ts {
                 entry.duplicates += 1;
                 return;
@@ -506,16 +716,14 @@ impl Analyzer {
         if ts[3] & 0xc0 == 0 {
             if ts[1] & 0x40 != 0 {
                 let (pts, dts) = pes_timestamps(&ts[payload_offset..]);
-                if self.report.clock_points.len() < 100_000 {
-                    for (kind, value) in [(ClockKind::Pts, pts), (ClockKind::Dts, dts)] {
-                        if let Some(ticks) = value {
-                            self.report.clock_points.push(ClockPoint {
-                                packet_index: self.report.packets - 1,
-                                pid,
-                                kind,
-                                ticks,
-                            });
-                        }
+                for (kind, value) in [(ClockKind::Pts, pts), (ClockKind::Dts, dts)] {
+                    if let Some(ticks) = value {
+                        self.report.clock_points.push(ClockPoint {
+                            packet_index: self.report.packets - 1,
+                            pid,
+                            kind,
+                            ticks,
+                        });
                     }
                 }
             }
@@ -534,7 +742,13 @@ impl Analyzer {
                 if probe.stream_type() != stream_type {
                     *probe = VideoProbe::new(stream_type);
                 }
-                probe.push_packet(&ts[payload_offset..], ts[1] & 0x40 != 0);
+                let nal_random_access = probe.push_packet(&ts[payload_offset..], ts[1] & 0x40 != 0);
+                if nal_random_access {
+                    let point = (self.report.packets - 1, pid);
+                    if self.report.random_access_points.last().copied() != Some(point) {
+                        self.report.random_access_points.push(point);
+                    }
+                }
             }
         }
         if let Some(assembler) = self.sections.get_mut(&pid) {
@@ -592,7 +806,7 @@ impl SectionAssembler {
             } else {
                 let length =
                     (usize::from(self.partial[1] & 0x0f) << 8) | usize::from(self.partial[2]);
-                if !(4..=1021).contains(&length) {
+                if !(4..=4093).contains(&length) {
                     self.partial.clear();
                     return;
                 }
@@ -605,7 +819,7 @@ impl SectionAssembler {
                 continue;
             }
             let length = (usize::from(self.partial[1] & 0x0f) << 8) | usize::from(self.partial[2]);
-            if !(4..=1021).contains(&length) {
+            if !(4..=4093).contains(&length) {
                 self.partial.clear();
                 return;
             }
@@ -667,20 +881,56 @@ impl Analyzer {
         }
         let table = self.report.tables.entry((pid, section[0])).or_default();
         table.sections += 1;
+        let syntax = section[1] & 0x80 != 0;
+        let crc_present = syntax || section[0] == 0x73;
+        if crc_present
+            && ((syntax && section.len() < 12)
+                || (!syntax && section.len() < 11)
+                || mpeg_crc32(section) != 0)
+        {
+            table.crc_errors += 1;
+            self.report.section_crc_errors += 1;
+            return;
+        }
         if table.first_section.is_empty() {
             table.first_section.extend_from_slice(section);
         }
-        if section.len() >= 8 && section[1] & 0x80 != 0 {
-            table.version = Some((section[5] >> 1) & 0x1f);
-            table.section_number = Some(section[6]);
+        let (extension, version, number) = if syntax {
+            (
+                u16::from_be_bytes([section[3], section[4]]),
+                (section[5] >> 1) & 0x1f,
+                section[6],
+            )
+        } else {
+            (0, 0, 0)
+        };
+        table
+            .instances
+            .insert((extension, version, number), section.to_vec());
+        if syntax {
+            table.version = Some(version);
+            table.section_number = Some(number);
             table.last_section_number = Some(section[7]);
         }
-        if section.len() < 12 || section[1] & 0x80 == 0 {
-            return;
+        if pid == 0x0010 && !matches!(section[0], 0x40 | 0x41 | 0x72) {
+            self.report.tr_events.push(TrEvent {
+                packet_index: self.report.packets - 1,
+                pid,
+                indicator: "NIT_actual_error",
+                detail: format!("Unexpected table ID 0x{:02X} on NIT PID", section[0]),
+                exact_packet: true,
+            });
         }
-        if mpeg_crc32(section) != 0 {
-            table.crc_errors += 1;
-            self.report.section_crc_errors += 1;
+        self.report.section_events.push(SectionEvent {
+            packet_index: self.report.packets - 1,
+            pid,
+            table_id: section[0],
+            extension,
+            version,
+            section_number: number,
+            last_section_number: if syntax { section[7] } else { 0 },
+        });
+        if !syntax {
             return;
         }
         self.report.valid_sections += 1;
@@ -690,7 +940,20 @@ impl Analyzer {
         match (pid, section[0]) {
             (0, 0x00) => self.pat(section),
             (_, 0x02) => self.pmt(pid, section),
-            (0x1ffb, 0xc7..=0xc9) => self.report.standard = BroadcastStandard::AtscPsip,
+            (0x1ffb, 0xc8) => {
+                self.report.standard = BroadcastStandard::AtscPsip;
+                self.report.signalled_modulation = signalled_atsc_modulation(section);
+            }
+            (0x1ffb, 0xc9) => {
+                self.report.standard = BroadcastStandard::AtscCablePsip;
+                self.report.signalled_modulation = signalled_atsc_modulation(section);
+            }
+            (0x1ffb, 0xc7 | 0xca..=0xcd) if self.report.standard == BroadcastStandard::Unknown => {
+                self.report.standard = BroadcastStandard::AtscPsip;
+            }
+            (0x0023, 0xc3) | (0x0024, 0xc4) | (0x0029, 0xc8) => {
+                self.report.standard = BroadcastStandard::Isdb;
+            }
             (0x0010, 0x40 | 0x41) | (0x0011, 0x42 | 0x46)
                 if self.report.standard == BroadcastStandard::Unknown =>
             {
@@ -735,8 +998,10 @@ impl Analyzer {
             self.sections.entry(pmt_pid).or_default();
         }
         self.sections.retain(|pid, _| {
-            matches!(*pid, 0 | 0x0010 | 0x0011 | 0x0012 | 0x0014 | 0x1ffb)
-                || current.values().any(|program| program.pmt_pid == *pid)
+            matches!(
+                *pid,
+                0 | 1 | 2 | 0x0010..=0x0014 | 0x001e | 0x001f | 0x0023 | 0x0024 | 0x0029 | 0x1ffb
+            ) || current.values().any(|program| program.pmt_pid == *pid)
         });
         self.active_pmts.retain(|number, key| {
             current
@@ -1054,5 +1319,131 @@ mod tests {
         analyzer.packet(&packet(0x1ffb, 0, &corrupt));
         assert_eq!(analyzer.report.standard, BroadcastStandard::Unknown);
         assert_eq!(analyzer.report.section_crc_errors, 1);
+    }
+    fn vct_section(table_id: u8, modulation_mode: u8) -> Vec<u8> {
+        let mut section = vec![table_id, 0xb0, 0, 0, 1, 0xc1, 0, 0, 0, 1];
+        let mut channel = vec![0; 32];
+        channel[17] = modulation_mode;
+        section.extend(channel);
+        section.extend([0xf0, 0]);
+        let section_length = section.len() + 4 - 3;
+        section[1] |= ((section_length >> 8) as u8) & 0x0f;
+        section[2] = section_length as u8;
+        with_crc(section)
+    }
+
+    #[test]
+    fn distinguishes_terrestrial_and_cable_psip_from_vct_signalling() {
+        for (table_id, modulation_mode, standard, modulation, profile) in [
+            (
+                0xc8,
+                0x04,
+                BroadcastStandard::AtscPsip,
+                SignalledModulation::Vsb8,
+                crate::ComplianceProfile::Atsc1A65_2013,
+            ),
+            (
+                0xc9,
+                0x02,
+                BroadcastStandard::AtscCablePsip,
+                SignalledModulation::Qam64,
+                crate::ComplianceProfile::J83BQam64AtscCablePsip,
+            ),
+            (
+                0xc9,
+                0x03,
+                BroadcastStandard::AtscCablePsip,
+                SignalledModulation::Qam256,
+                crate::ComplianceProfile::J83BQam256AtscCablePsip,
+            ),
+        ] {
+            let mut analyzer = Analyzer::new(TransportStreamFormat::Packet188);
+            analyzer.packet(&packet(0x1ffb, 0, &vct_section(table_id, modulation_mode)));
+            let report = analyzer.finish();
+            assert_eq!(report.standard, standard);
+            assert_eq!(report.signalled_modulation, modulation);
+            assert_eq!(crate::ComplianceProfile::suggested(&report), profile);
+        }
+    }
+
+    fn pcr_packet(pid: u16, counter: u8, pcr: u64) -> [u8; 188] {
+        let mut bytes = [0xff; 188];
+        let base = pcr / 300;
+        let extension = pcr % 300;
+        bytes[0] = 0x47;
+        bytes[1] = (pid >> 8) as u8 & 0x1f;
+        bytes[2] = pid as u8;
+        bytes[3] = 0x30 | counter;
+        bytes[4] = 7;
+        bytes[5] = 0x10;
+        bytes[6] = (base >> 25) as u8;
+        bytes[7] = (base >> 17) as u8;
+        bytes[8] = (base >> 9) as u8;
+        bytes[9] = (base >> 1) as u8;
+        bytes[10] = ((base & 1) << 7) as u8 | 0x7e | (extension >> 8) as u8;
+        bytes[11] = extension as u8;
+        bytes
+    }
+
+    #[test]
+    fn repetition_checks_are_not_reported_as_pass_without_a_timebase() {
+        let mut analyzer = Analyzer::new(TransportStreamFormat::Packet188);
+        analyzer.packet(&packet(0, 0, &pat_section(0, 0, 0, &[(1, 0x100)])));
+        analyzer.packet(&packet(
+            0x100,
+            0,
+            &pmt_section(0, 0, 0, 1, 0x101, &[(0x24, 0x101)]),
+        ));
+        let report = analyzer.finish();
+        let compliance =
+            crate::compliance::tr101290_report(&report, crate::ComplianceProfile::DvbSi);
+        assert_eq!(compliance.count("PAT_error"), None);
+        assert_eq!(compliance.count("PMT_error"), None);
+        assert_eq!(compliance.count("NIT_actual_error"), None);
+    }
+
+    #[test]
+    fn tr_pcr_checks_start_after_pmt_and_null_pid_has_no_cc_error() {
+        let mut analyzer = Analyzer::new(TransportStreamFormat::Packet188);
+        analyzer.packet(&pcr_packet(0x101, 0, 100_000));
+        analyzer.packet(&packet(0, 0, &pat_section(0, 0, 0, &[(1, 0x100)])));
+        analyzer.packet(&packet(
+            0x100,
+            0,
+            &pmt_section(0, 0, 0, 1, 0x101, &[(0x24, 0x101)]),
+        ));
+        for (counter, ticks) in [(1, 1_000_000), (2, 1_270_000), (3, 1_540_014)] {
+            for _ in 0..100 {
+                analyzer.packet(&packet(0x1fff, 0, &[]));
+            }
+            analyzer.packet(&pcr_packet(0x101, counter, ticks));
+        }
+        let report = analyzer.finish();
+        let tr = crate::compliance::tr101290_report(&report, crate::ComplianceProfile::DvbSi);
+        assert_eq!(report.pids[&0x1fff].continuity_errors, 0);
+        assert_eq!(tr.count("Continuity_count_error"), Some(0));
+        assert_eq!(tr.count("PCR_accuracy_error"), Some(1));
+        assert_eq!(tr.count("PCR_repetition_error"), Some(0));
+        let event = tr
+            .events
+            .iter()
+            .find(|event| event.indicator == "PCR_accuracy_error");
+        assert!(event.is_some());
+    }
+
+    #[test]
+    fn pmt_on_dvb_nit_pid_is_reported_as_table_id_error() {
+        let mut analyzer = Analyzer::new(TransportStreamFormat::Packet188);
+        analyzer.packet(&packet(0, 0, &pat_section(0, 0, 0, &[(1, 0x10)])));
+        analyzer.packet(&packet(
+            0x10,
+            0,
+            &pmt_section(0, 0, 0, 1, 0x101, &[(0x24, 0x101)]),
+        ));
+        let report = analyzer.finish();
+        let tr = crate::compliance::tr101290_report(&report, crate::ComplianceProfile::DvbSi);
+        assert_eq!(tr.count("NIT_actual_error"), Some(1));
+        assert_eq!(tr.events[0].packet_index, 1);
+        assert_eq!(report.packet_offset(1), 188);
     }
 }

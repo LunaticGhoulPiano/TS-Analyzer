@@ -2632,7 +2632,7 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "tsan-analyzer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tsan-core",
  "tsan-tsduck-sys",
@@ -2640,11 +2640,11 @@ dependencies = [
 
 [[package]]
 name = "tsan-cli"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "tsan-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "tsan-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "raw-window-handle",
@@ -2667,14 +2667,14 @@ dependencies = [
 
 [[package]]
 name = "tsan-input"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tsan-core",
 ]
 
 [[package]]
 name = "tsan-player"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -2687,11 +2687,11 @@ dependencies = [
 
 [[package]]
 name = "tsan-runtime"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "tsan-tsduck-sys"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
 ]

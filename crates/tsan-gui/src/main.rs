@@ -1,3 +1,5 @@
+mod update;
+
 #[cfg(target_os = "windows")]
 mod analysis_views;
 #[cfg(target_os = "windows")]
@@ -10,6 +12,8 @@ mod platform;
 mod player_worker;
 #[cfg(target_os = "windows")]
 mod report_export;
+#[cfg(target_os = "windows")]
+mod ui_components;
 
 #[cfg(target_os = "windows")]
 use std::env;
@@ -32,6 +36,7 @@ fn main() -> eframe::Result {
         wgpu_options,
         viewport: egui::ViewportBuilder::default()
             .with_title("TS Analyzer")
+            // Keep an alpha-capable surface for runtime theme switching; Light still clears opaquely.
             .with_transparent(true)
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([720.0, 480.0]),

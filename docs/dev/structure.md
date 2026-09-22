@@ -11,7 +11,7 @@
 | `tsan-analyzer` | 離線掃描 TS：PAT／PMT、PID／節目與錯誤統計；從 AVC／HEVC SPS 取得解析度，從 TSDuck SPS／VUI 取得可用的幀率，無需播放。預設啟用原生 TSDuck 分析。 |
 | `tsan-tsduck-sys` | 進程內 C++ bridge 與安全 Rust 包裝；opaque session、188-byte 封包對齊、TSDuck section／continuity／standard 統計及 SPS／VUI 解析。不呼叫 TSDuck CLI。 |
 | `tsan-player` | Windows GStreamer 檔案播放、D3D12／D3D11 後端；已定義 File／UDP／RTP 來源與錄製選項，但 IP 接收及錄製尚未實作。跳轉仍有待修正。 |
-| `tsan-gui` | 多檔 TS Queue、各檔獨立背景分析結果、文件頁籤與雙欄 Overview 比較；Analyzer 子頁、Player、Log 與 Information。播放仍是單一 worker。 |
+| `tsan-gui` | 多檔 Transport Streams 清單、各檔獨立背景分析結果、只顯示已勾選檔案的比較頁籤、Analyzer 子頁、Player 與 Log。比較欄數會依視窗寬度調整；播放仍是單一 worker。 |
 | `tsan-runtime`、`tsan-cli` | 仍為占位實作，未承擔正式資料調度或 CLI 分析。 |
 
 ## 現況資料流
@@ -19,7 +19,7 @@
 ```mermaid
 flowchart LR
     file["TS 檔案"]
-    gui["tsan-gui<br/>TS Queue／各檔背景工作"]
+    gui["tsan-gui<br/>Transport Streams／各檔背景工作"]
     analyzer["tsan-analyzer<br/>離線 TS 報告"]
     native["tsan-tsduck-sys<br/>C ABI → libtsduck"]
     input["tsan-input<br/>檔案來源探測"]
@@ -43,14 +43,14 @@ flowchart LR
   - 匯入後由 Rust 掃描封包，並經 C ABI 在同一程序呼叫 TSDuck；GStreamer 的解碼結果不是分析真值。Information 不等待播放。
   - 原生包裝器可接收任意切分的 188-byte buffer；目前檔案分析直接送入已對齊封包，GStreamer appsink 即時路徑尚未串接。
   - 匯入對話框可一次選多個檔案；分析最多兩個工作同時執行，其餘排隊，每個 TS 保留獨立結果。選擇 queue 或頁籤只切換分析視圖，從 queue 的「Play TS」才載入單一 Player。近期檔案記在使用者 AppData。IP Streaming 目前只有 UDP／RTP 入口，尚無接收後端。
-  - Overview 的 Information、Programs、PID 清單有區塊捲動，外層另有整頁捲動。PSI／SI 子頁目前只有 PAT／PMT 摘要；Packets、TR 101 290 與 Graphs 的完整資料與互動尚未實作。
+  - Analyzer 已提供 Overview、PSI／SI、Packets、TR 101 290、Bitrate、PCR／PTS／DTS 與 random-access spacing。TR 101 290 使用 Family → System → Signalling → Delivery 四層 profile；產品範圍包含 DVB-T／T2／C Annex A、ATSC 1.0、J.83 Annex B／C、ISDB-T Japan／International 與 DTMB。ATSC PSIP、ARIB／ABNT SI 及 China DTV SI 規則由各自模組疊加在 MPEG-2 TS Priority 1／2 檢查上。
   - 目前 GUI 直接協調分析與播放，尚未透過 `tsan-runtime` 分派。
   - `tsan-recorder` 已移除。IP 串流及 TS 錄製屬於 `tsan-player` session；`tsan-input` 僅提供可重用的輸入／封包處理。
 
 ## 分析擴充方向（規劃）
 
   1. 經 TSDuck bridge 輸出完整 PSI／DVB SI／ATSC PSIP 表與 descriptor；以偵測到的廣播標準套用對應規則，不把 DVB 專用缺失套到 ATSC。
-  2. 經 TSDuck bridge 擴充 TR 101 290 優先級檢查、CC／TEI、PCR／PTS／DTS 品質與異常事件；有問題的 PCR 不應單獨決定檔案時間軸。
+  2. TR 101 290 對所有 MPEG-2 TS profile 共用 Priority 1／2 checker；DVB 使用 Priority 3，ATSC Cable PSIP、ARIB、ABNT 與 China DTV SI 使用對應的 table PID、完整性與週期規則。純 TS 靜態分析只把 VCT 或 delivery descriptor 內容視為 signalled hint，不能把 RF modulation、FEC、MER 或 BER 標成已驗證。
   3. 擴充音訊／影片 metadata。H.264／H.265 SPS 解析度與 TSDuck 可提供的 SPS／VUI 幀率已接通；AAC、更多 parameter set 與無 VUI 時的幀率仍待完成。
   4. 擴充 packet offset 與 IDR／IRAP 索引；必要時以 PTS 或可驗證的 packet clock 回退。播放器使用索引定位，仍由 GStreamer 負責解碼與輸出。
 

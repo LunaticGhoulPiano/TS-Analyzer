@@ -149,7 +149,7 @@ fn write_latex_bundle(
         .map_err(|error| error.to_string())?;
     fs::write(sections.join("PSI_SI_Tree.tex"), psi_tex(inputs))
         .map_err(|error| error.to_string())?;
-    fs::write(sections.join("TR_101_290.tex"), tr_tex(inputs))
+    fs::write(sections.join("TR_101_290.tex"), tr101290_tex(inputs))
         .map_err(|error| error.to_string())?;
     fs::write(sections.join("Graphs.tex"), graphs_tex(inputs))
         .map_err(|error| error.to_string())?;
@@ -317,77 +317,69 @@ fn psi_tex(inputs: &[ExportInput]) -> String {
     output
 }
 
-fn tr_tex(inputs: &[ExportInput]) -> String {
+fn tr101290_tex(inputs: &[ExportInput]) -> String {
     let mut output = String::from("\\section{TR 101 290}\n");
     for input in inputs {
         file_heading(&mut output, input);
-        let report = &input.report;
-        let cc: u64 = report.pids.values().map(|pid| pid.continuity_errors).sum();
-        let tei: u64 = report.pids.values().map(|pid| pid.transport_errors).sum();
-        for (priority, indicators) in [
-            (
-                "Priority 1",
-                vec![
-                    ("TS_sync_loss", None),
-                    ("Sync_byte_error", Some(report.malformed_packets)),
-                    (
-                        "PAT_error (presence only)",
-                        Some(u64::from(!report.tables.contains_key(&(0, 0)))),
-                    ),
-                    ("Continuity_count_error", Some(cc)),
-                    (
-                        "PMT_error (presence only)",
-                        Some(u64::from(report.programs.values().any(|program| {
-                            !report.tables.contains_key(&(program.pmt_pid, 2))
-                        }))),
-                    ),
-                    ("PID_error", None),
-                ],
-            ),
-            (
-                "Priority 2",
-                vec![
-                    ("Transport_error", Some(tei)),
-                    ("CRC_error", Some(report.section_crc_errors)),
-                    ("PCR_repetition_error", None),
-                    ("PCR_discontinuity_indicator_error", None),
-                    ("PCR_accuracy_error", None),
-                    ("PTS_error", None),
-                    ("CAT_error", None),
-                ],
-            ),
-            (
-                "Priority 3",
-                vec![
-                    ("NIT_actual_error", None),
-                    ("NIT_other_error", None),
-                    ("SI_repetition_error", None),
-                    ("Unreferenced_PID", None),
-                    ("SDT_actual_error", None),
-                    ("SDT_other_error", None),
-                    ("EIT_actual_error", None),
-                    ("EIT_other_error", None),
-                    ("EIT_PF_error", None),
-                    ("RST_error", None),
-                    ("TDT_error", None),
-                ],
-            ),
-        ] {
+        let profile = tsan_analyzer::ComplianceProfile::suggested(&input.report);
+        let summary = tsan_analyzer::tr101290_report(&input.report, profile);
+        let _ = writeln!(
+            output,
+            "\\noindent Applied profile: {}.\\par",
+            tex(summary.profile.label())
+        );
+        let _ = writeln!(
+            output,
+            "\\noindent Family: {}; System: {}; Signalling: {}; Delivery: {}.\\par",
+            tex(summary.hierarchy.family.label()),
+            tex(summary.hierarchy.system.label()),
+            tex(summary.hierarchy.signaling),
+            tex(summary.hierarchy.delivery)
+        );
+        output.push_str("\\begin{itemize}\n");
+        for standard in summary.standards {
             let _ = writeln!(
                 output,
-                "\\subsubsection{{{priority}}}\\begin{{longtable}}{{p{{95mm}}p{{45mm}}}}\\toprule\nIndicator & Observed \\\\ \\midrule"
+                "\\item {} --- {} ({})",
+                tex(standard.code),
+                tex(standard.title),
+                tex(standard.scope)
             );
-            for (name, count) in indicators {
-                row(
-                    &mut output,
-                    name,
-                    count.map_or_else(|| "Not measured".to_owned(), |value| value.to_string()),
+        }
+        output.push_str("\\end{itemize}\n");
+        let groups = summary
+            .indicators
+            .iter()
+            .map(|item| item.group)
+            .collect::<std::collections::BTreeSet<_>>();
+        for group in groups {
+            let _ = writeln!(
+                output,
+                "\\subsubsection{{{}}}\\begin{{longtable}}{{p{{55mm}}p{{25mm}}p{{20mm}}p{{55mm}}}}\\toprule\nIndicator & Status & Observed & Standard \\\\ \\midrule",
+                tex(group)
+            );
+            for item in summary.indicators.iter().filter(|item| item.group == group) {
+                let observed = item
+                    .observed
+                    .map_or_else(|| "---".to_owned(), |value| value.to_string());
+                let _ = writeln!(
+                    output,
+                    "{} & {} & {} & {} \\\\",
+                    tex(item.name),
+                    tex(item.status.label()),
+                    observed,
+                    tex(item.reference)
                 );
             }
             output.push_str("\\bottomrule\\end{longtable}\n");
         }
+        let _ = writeln!(
+            output,
+            "\\noindent Event records: {}.\\par",
+            summary.events.len()
+        );
     }
-    output.push_str("\\noindent Not measured is distinct from zero detected errors.\\par\n");
+    output.push_str("\\noindent Unmeasured, inapplicable and unimplemented checks are reported as distinct states.\\par\n");
     output
 }
 
@@ -466,6 +458,9 @@ impl Cbor {
         self.major(3, data.len() as u64);
         self.0.extend_from_slice(data.as_bytes());
     }
+    fn bool(&mut self, value: bool) {
+        self.0.push(if value { 0xf5 } else { 0xf4 });
+    }
     fn optional(&mut self, value: Option<u64>) {
         if let Some(value) = value {
             self.uint(value);
@@ -479,7 +474,7 @@ fn encode_cbor(inputs: &[ExportInput]) -> Vec<u8> {
     let mut cbor = Cbor(Vec::new());
     cbor.map(3);
     cbor.uint(0);
-    cbor.uint(1); // schema version
+    cbor.uint(3); // schema version
     cbor.uint(1);
     cbor.uint(
         SystemTime::now()
@@ -490,7 +485,7 @@ fn encode_cbor(inputs: &[ExportInput]) -> Vec<u8> {
     cbor.array(inputs.len());
     for input in inputs {
         let report = &input.report;
-        cbor.map(12);
+        cbor.map(13);
         cbor.uint(0);
         cbor.text(&input.path.to_string_lossy());
         cbor.uint(1);
@@ -611,6 +606,40 @@ fn encode_cbor(inputs: &[ExportInput]) -> Vec<u8> {
                 .ok()
                 .map(|metadata| metadata.len()),
         );
+        cbor.uint(12);
+        let compliance = tsan_analyzer::tr101290_report(
+            report,
+            tsan_analyzer::ComplianceProfile::suggested(report),
+        );
+        cbor.map(3);
+        cbor.uint(0);
+        cbor.array(compliance.indicators.len());
+        for item in &compliance.indicators {
+            cbor.array(6);
+            cbor.text(item.group);
+            cbor.text(item.name);
+            cbor.text(item.status.label());
+            cbor.optional(item.observed);
+            cbor.text(item.note);
+            cbor.text(item.reference);
+        }
+        cbor.uint(1);
+        cbor.array(compliance.events.len());
+        for event in &compliance.events {
+            cbor.array(6);
+            cbor.uint(event.packet_index);
+            cbor.uint(report.packet_offset(event.packet_index));
+            cbor.uint(u64::from(event.pid));
+            cbor.text(event.indicator);
+            cbor.text(&event.detail);
+            cbor.bool(event.exact_packet);
+        }
+        cbor.uint(2);
+        cbor.array(4);
+        cbor.text(compliance.hierarchy.family.label());
+        cbor.text(compliance.hierarchy.system.label());
+        cbor.text(compliance.hierarchy.signaling);
+        cbor.text(compliance.hierarchy.delivery);
     }
     cbor.0
 }

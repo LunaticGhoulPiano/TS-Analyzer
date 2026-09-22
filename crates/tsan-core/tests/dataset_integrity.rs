@@ -217,7 +217,7 @@ fn validate_expected_reference(
 ) -> Result<(), Box<dyn Error>> {
     if !matches!(
         expected_reference.category.as_str(),
-        "transport" | "analyzer" | "tables" | "clocks" | "tr101290"
+        "transport" | "analyzer" | "tables" | "clocks" | "tr101290" | "compliance"
     ) {
         return Err(invalid_data(format!(
             "unsupported expected category for case {}: {}",
