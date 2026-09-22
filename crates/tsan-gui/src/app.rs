@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use tsan_analyzer::{AnalysisReport, BroadcastStandard, analyze_file};
@@ -36,6 +36,7 @@ const NAVIGATION_DEFAULT_WIDTH: f32 = 210.0;
 const MAX_CONCURRENT_ANALYSES: usize = 2;
 const BASELINE_COMPARISON_WINDOW_WIDTH: f32 = 1920.0;
 const BASELINE_COMPARISON_COUNT: usize = 3;
+const TRANSIENT_ERROR_DURATION: Duration = Duration::from_secs(3);
 // 0 is fully transparent and 255 is fully opaque. This controls tint, not blur radius.
 const DEFAULT_TRANSPARENT_BACKGROUND_OPACITY: u8 = 195;
 
@@ -206,6 +207,7 @@ pub struct TsanApp {
     timeline_drag_seconds: Option<f64>,
     embedded_video_height: Option<f32>,
     local_error: Option<String>,
+    local_error_expires_at: Option<Instant>,
     log_entries: Vec<LogEntry>,
     next_log_sequence: u64,
     last_worker_log_sequence: u64,
@@ -328,6 +330,7 @@ impl TsanApp {
             timeline_drag_seconds: None,
             embedded_video_height: None,
             local_error,
+            local_error_expires_at: None,
             log_entries: Vec::new(),
             next_log_sequence: 1,
             last_worker_log_sequence: 0,
@@ -499,8 +502,30 @@ impl TsanApp {
 
     fn set_local_error(&mut self, category: LogCategory, message: impl Into<String>) {
         let message = message.into();
+        self.local_error_expires_at = None;
         self.local_error = Some(message.clone());
         self.record_log(LogLevel::Error, category, message);
+    }
+
+    fn set_transient_local_error(&mut self, category: LogCategory, message: impl Into<String>) {
+        let message = message.into();
+        self.local_error = Some(message.clone());
+        self.local_error_expires_at = Some(Instant::now() + TRANSIENT_ERROR_DURATION);
+        self.record_log(LogLevel::Error, category, message);
+    }
+
+    fn expire_local_error(&mut self) {
+        if self
+            .local_error_expires_at
+            .is_some_and(|expires_at| Instant::now() >= expires_at)
+        {
+            self.clear_local_error();
+        }
+    }
+
+    fn clear_local_error(&mut self) {
+        self.local_error = None;
+        self.local_error_expires_at = None;
     }
 
     fn ensure_selected_adapter(&mut self) {
@@ -535,7 +560,7 @@ impl TsanApp {
     }
 
     fn load_player_input(&mut self, input: PathBuf) {
-        self.local_error = None;
+        self.clear_local_error();
         self.source_view = None;
         self.ip_streaming_protocol = None;
         self.player_view = PlayerView::PlayTs;
@@ -556,7 +581,7 @@ impl TsanApp {
         self.source_view = Some(InputSourceKind::IpStreaming);
         self.ip_streaming_protocol = Some(protocol);
         self.player_view = PlayerView::IpStreaming;
-        self.local_error = None;
+        self.clear_local_error();
         self.page = Page::Player;
         self.record_log(
             LogLevel::Info,
@@ -1330,7 +1355,7 @@ impl TsanApp {
                     self.selected_document = Some(index);
                     self.pane_widths = equal_pane_weights(self.visible_documents.len());
                 } else {
-                    self.set_local_error(
+                    self.set_transient_local_error(
                         LogCategory::Analysis,
                         format!(
                             "The current window width supports up to {} TS files side by side.",
@@ -2798,6 +2823,7 @@ impl eframe::App for TsanApp {
 
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.receive_snapshots();
+        self.expire_local_error();
         let context = root_ui.ctx().clone();
         context.request_repaint_after(Duration::from_millis(
             if self.theme == AppTheme::LiquidGlass
@@ -3465,7 +3491,7 @@ mod glass_window_tests {
                         return Err("Capture failure did not clean up and fall back".to_owned());
                     }
                     self.app.theme = AppTheme::LiquidGlass;
-                    self.app.local_error = None;
+                    self.app.clear_local_error();
                     self.stage = 7;
                 }
                 7 if background.is_some() => {
