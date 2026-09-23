@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::ui_components::{ArrowScrollArea, ResizeHandle};
+use crate::ui_components::{ArrowScrollArea, ResizeHandle, help_text};
 use eframe::egui;
 use tsan_analyzer::{
     AnalysisReport, BITRATE_WINDOW_PACKETS, ClockKind, PacketWindow, read_packet_window,
@@ -51,6 +51,12 @@ pub struct ViewState {
     graph_pan_start: Option<(String, egui::Pos2, GraphView)>,
     pub graph_series_enabled: BTreeMap<(u16, u8), bool>,
     pub graph_service: Option<u16>,
+    pub gop_pid: Option<u16>,
+    pub gop_mode: u8,
+    pub gop_vcl_bytes: bool,
+    pub selected_gop: usize,
+    gop_list_height: f32,
+    gop_column_widths: [f32; 5],
     pub graph_relative_clock: bool,
     pub tr101290_profile: Option<tsan_analyzer::ComplianceProfile>,
     packet_split_ratio: f32,
@@ -66,6 +72,8 @@ impl ViewState {
             show_dts: true,
             graph_show_legend: true,
             bitrate_difference_percent: true,
+            gop_list_height: 280.0,
+            gop_column_widths: [58.0, 65.0, 120.0, 100.0, 85.0],
             packet_split_ratio: 0.48,
             tr101290_summary_ratio: 0.58,
             ..Self::default()
@@ -610,10 +618,13 @@ fn section_tree(ui: &mut egui::Ui, pid: u16, table_id: u8, section: &[u8]) {
                     u16::from_be_bytes([section[3], section[4]])
                 ));
             }
-            ui.weak(format!(
-                "{} section bytes; table-specific fields are not decoded",
-                section.len()
-            ));
+            help_text(
+                ui,
+                format!(
+                    "{} section bytes; table-specific fields are not decoded",
+                    section.len()
+                ),
+            );
         }
     }
 }
@@ -626,7 +637,10 @@ pub fn psi_si_tree(ui: &mut egui::Ui, report: &AnalysisReport, state: &mut ViewS
             egui::TextEdit::singleline(&mut state.psi_filter).hint_text("Table, PID or table ID"),
         );
     });
-    ui.weak("Each branch summarizes a unique table section. Repeated TS packets and raw bytes are in Packets.");
+    help_text(
+        ui,
+        "Each branch summarizes a unique table section. Repeated TS packets and raw bytes are in Packets.",
+    );
     let needle = state.psi_filter.trim().to_ascii_lowercase();
     let mut shown = 0;
     for (&(pid, table_id), table) in &report.tables {
@@ -892,7 +906,7 @@ fn packet_details(ui: &mut egui::Ui, packet: &tsan_analyzer::PacketRecord) {
             );
         });
     } else {
-        ui.weak("No payload in this packet.");
+        help_text(ui, "No payload in this packet.");
     }
 }
 
@@ -988,7 +1002,7 @@ fn selected_packet_details(ui: &mut egui::Ui, window: &PacketWindow, selected: O
         .iter()
         .find(|packet| Some(packet.index) == selected)
     else {
-        ui.weak("Select a packet to inspect all fields.");
+        help_text(ui, "Select a packet to inspect all fields.");
         return;
     };
     ui.heading(format!(
@@ -1241,7 +1255,7 @@ fn tr101290_summary_panel(
                                             value_cell(ui, count.to_string());
                                         }
                                         None => {
-                                            let _ = ui.weak("\u{2014}");
+                                            let _ = help_text(ui, "\u{2014}");
                                         }
                                     }
                                     ui.end_row();
@@ -1256,7 +1270,7 @@ fn tr101290_summary_panel(
             egui::RichText::new(
                 "Pass and Fail are shown only for measured checks. Not observed, not applicable and not implemented remain distinct states.",
             )
-            .weak(),
+            .size(16.0).color(item_color(ui)),
         )
         .wrap(),
     );
@@ -1286,7 +1300,7 @@ fn tr101290_events_panel(
     ui.add(
         egui::Label::new(
             egui::RichText::new("Exact packet offsets are links to the complete 188-byte packet. A leading ~ marks an estimated analysis position for an absence or duration event.")
-                .weak(),
+                .size(16.0).color(item_color(ui)),
         )
         .wrap(),
     );
@@ -1489,16 +1503,18 @@ fn graph_range_controls(ui: &mut egui::Ui, state: &mut ViewState, plot_id: &str)
             if ui.button("Reset view").clicked() {
                 *view = GraphView::default();
             }
-            reset_filter = ui
-                .button("Reset Filter")
-                .on_hover_text("Show every available PID, service and clock series again.")
-                .clicked();
+            if !plot_id.starts_with("gop-") {
+                reset_filter = ui
+                    .button("Reset Filter")
+                    .on_hover_text("Show every available PID, service and clock series again.")
+                    .clicked();
+            }
             ui.checkbox(&mut state.graph_show_legend, "Legend");
         });
         ui.add(
             egui::Label::new(
                 egui::RichText::new("Left drag: rectangle zoom X/Y. Right drag: pan. Wheel or middle-button vertical drag: zoom X/Y around cursor. Zoom stops at the full data extent and at a minimum of eight sample intervals.")
-                    .weak(),
+                    .size(16.0).color(item_color(ui)),
             )
             .wrap(),
         );
@@ -1639,6 +1655,19 @@ fn normalized_axis_range(low: f64, high: f64) -> (f64, f64) {
     (low - padding, high + padding)
 }
 
+fn padded_axis_range(low: f64, high: f64) -> (f64, f64) {
+    let (low, high) = normalized_axis_range(low, high);
+    let padding = ((high - low) * 0.10).max(high.abs() * 0.02).max(0.01);
+    (
+        if low >= 0.0 {
+            (low - padding).max(0.0)
+        } else {
+            low - padding
+        },
+        high + padding,
+    )
+}
+
 fn bounded_axis_window(
     low: f64,
     high: f64,
@@ -1766,6 +1795,8 @@ fn elapsed_time_tick(seconds: f64) -> String {
 fn x_axis_tick(x_label: &str, value: f64) -> String {
     if x_label.contains("time") || x_label.contains("Time") || x_label.contains("seconds") {
         elapsed_time_tick(value)
+    } else if x_label.contains("packet") || x_label.contains("Packet") {
+        format!("{value:.0}")
     } else {
         axis_tick(value)
     }
@@ -1835,7 +1866,12 @@ fn plot(
         .map(|point| point.1)
         .fold(f64::INFINITY, f64::min)
         .min(baseline_min);
-    let full_y = normalized_axis_range(
+    let axis_range = if plot_id.starts_with("gop-") {
+        crate::plot_range::gop_axis_range
+    } else {
+        padded_axis_range
+    };
+    let full_y = axis_range(
         full_min_y,
         all.iter()
             .map(|point| point.1)
@@ -1892,7 +1928,7 @@ fn plot(
             .map(|point| point.1)
             .fold(f64::NEG_INFINITY, f64::max),
     );
-    let (auto_min_y, auto_max_y) = normalized_axis_range(auto_y.0, auto_y.1);
+    let (auto_min_y, auto_max_y) = axis_range(auto_y.0, auto_y.1);
     let (min_y, max_y) = view.y_bounds.map_or((auto_min_y, auto_max_y), |bounds| {
         normalized_axis_range(bounds.0, bounds.1)
     });
@@ -1935,28 +1971,53 @@ fn plot(
     let x_steps = ((plot.width() / (endpoint_width + 28.0)).floor() as usize).clamp(2, 8);
     let y_steps = ((plot.height() / (axis_font.size * 3.6)).floor() as usize).clamp(2, 6);
     for step in 0..=x_steps {
-        let x = plot.left() + plot.width() * step as f32 / x_steps as f32;
+        let value = if x_label.starts_with("GOP index") {
+            min_x.ceil() + step as f64 * ((max_x - min_x) / x_steps as f64).ceil().max(1.0)
+        } else {
+            min_x + (max_x - min_x) * step as f64 / x_steps as f64
+        };
+        if value > max_x {
+            continue;
+        }
+        let x = plot.left() + plot.width() * ((value - min_x) / (max_x - min_x)) as f32;
         ui.painter()
             .vline(x, plot.y_range(), egui::Stroke::new(1.0, grid));
         ui.painter().text(
             egui::pos2(x, plot.bottom() + 7.0),
             egui::Align2::CENTER_TOP,
-            x_axis_tick(
-                x_label,
-                min_x + (max_x - min_x) * step as f64 / x_steps as f64,
-            ),
+            if x_label.starts_with("GOP index") {
+                format!("{value:.0}")
+            } else {
+                x_axis_tick(x_label, value)
+            },
             axis_font.clone(),
             axis_color,
         );
     }
     for step in 0..=y_steps {
-        let y = plot.top() + plot.height() * step as f32 / y_steps as f32;
+        let value = if y_label == "Pictures per GOP" || y_label.ends_with("(bytes)") {
+            max_y.floor() - step as f64 * ((max_y - min_y) / y_steps as f64).ceil().max(1.0)
+        } else {
+            if step == y_steps {
+                min_y
+            } else {
+                max_y - (max_y - min_y) * step as f64 / y_steps as f64
+            }
+        };
+        if value < min_y {
+            continue;
+        }
+        let y = plot.top() + plot.height() * ((max_y - value) / (max_y - min_y)) as f32;
         ui.painter()
             .hline(plot.x_range(), y, egui::Stroke::new(1.0, grid));
         ui.painter().text(
             egui::pos2(plot.left() - 8.0, y),
             egui::Align2::RIGHT_CENTER,
-            axis_tick(max_y - (max_y - min_y) * step as f64 / y_steps as f64),
+            if y_label == "Pictures per GOP" || y_label.ends_with("(bytes)") {
+                format!("{value:.0}")
+            } else {
+                axis_tick(value)
+            },
             axis_font.clone(),
             axis_color,
         );
@@ -2325,37 +2386,12 @@ pub fn bitrate(ui: &mut egui::Ui, report: &AnalysisReport, state: &mut ViewState
             return;
         }
     };
-    let mut by_pcr_pid: BTreeMap<u16, Vec<(u64, u64)>> = BTreeMap::new();
-    for point in report
-        .clock_points
-        .iter()
-        .filter(|point| point.kind == ClockKind::Pcr)
-    {
-        by_pcr_pid
-            .entry(point.pid)
-            .or_default()
-            .push((point.packet_index, point.ticks));
-    }
-    let Some((pcr_pid, pcr)) = by_pcr_pid.iter().max_by_key(|(_, samples)| samples.len()) else {
-        ui.label("Per-PID bitrate needs PCR timestamps; none were found.");
-        return;
-    };
-    const WRAP: u64 = (1_u64 << 33) * 300;
-    let sample_rate = |left: (u64, u64), right: (u64, u64)| {
-        let delta = (right.1 + WRAP - left.1) % WRAP;
-        (delta > 0 && delta <= 54_000_000 && right.0 > left.0)
-            .then(|| (right.0 - left.0) as f64 * 188.0 * 8.0 * 27.0 / delta as f64)
-    };
-    let mut rates = pcr
-        .windows(2)
-        .filter_map(|pair| sample_rate(pair[0], pair[1]))
-        .collect::<Vec<_>>();
-    if rates.is_empty() {
+    let Some(rate_series) = tsan_analyzer::bitrate_series(report) else {
         ui.label("PCR timestamps cannot establish a transport bitrate.");
         return;
-    }
-    rates.sort_by(f64::total_cmp);
-    let fallback_rate = rates[rates.len() / 2];
+    };
+    let pcr_pid = rate_series.pcr_pid;
+    let fallback_rate = rate_series.median_mbps;
     let interval_seconds =
         BITRATE_WINDOW_PACKETS as f64 * 188.0 * 8.0 / (fallback_rate * 1_000_000.0);
     key_value(
@@ -2366,7 +2402,10 @@ pub fn bitrate(ui: &mut egui::Ui, report: &AnalysisReport, state: &mut ViewState
             BITRATE_WINDOW_PACKETS, interval_seconds
         ),
     );
-    ui.weak("Bitrate is measured from packet counts in each sampling interval. Enabled PIDs are stacked by contribution; extra ticks and sample markers appear as you zoom in.");
+    help_text(
+        ui,
+        "Bitrate is measured from packet counts in each sampling interval. Enabled PIDs are stacked by contribution; extra ticks and sample markers appear as you zoom in.",
+    );
 
     let horizontal_unit = state.horizontal_unit;
     let x_value = |packet: u64| match horizontal_unit {
@@ -2378,31 +2417,7 @@ pub fn bitrate(ui: &mut egui::Ui, report: &AnalysisReport, state: &mut ViewState
     } else {
         "Elapsed stream time (PCR-derived)"
     };
-    let mut window_rates = Vec::with_capacity(report.bitrate_windows.len());
-    let mut pcr_cursor = 0;
-    for window in &report.bitrate_windows {
-        let end = window.first_packet + u64::from(window.packet_count);
-        while pcr_cursor < pcr.len() && pcr[pcr_cursor].0 < window.first_packet {
-            pcr_cursor += 1;
-        }
-        let mut last = None;
-        let mut local = Vec::new();
-        let mut cursor = pcr_cursor;
-        while cursor < pcr.len() && pcr[cursor].0 < end {
-            if let Some(previous) = last {
-                if let Some(rate) = sample_rate(previous, pcr[cursor]) {
-                    local.push(rate);
-                }
-            }
-            last = Some(pcr[cursor]);
-            cursor += 1;
-        }
-        window_rates.push(if local.is_empty() {
-            fallback_rate
-        } else {
-            local.iter().sum::<f64>() / local.len() as f64
-        });
-    }
+    let window_rates = rate_series.window_mbps;
 
     let total_points = report
         .bitrate_windows
@@ -2870,125 +2885,330 @@ pub fn timestamps(ui: &mut egui::Ui, report: &AnalysisReport, state: &mut ViewSt
     );
 }
 
-fn access_point_list(ui: &mut egui::Ui, by_pid: &BTreeMap<u16, Vec<u64>>) {
-    ui.heading("Access-point packets");
-    ArrowScrollArea::vertical()
-        .id_salt("access-point-packet-list")
-        .max_height(500.0)
-        .auto_shrink([false, false])
+fn gop_table(
+    ui: &mut egui::Ui,
+    video: &tsan_analyzer::VideoGops,
+    state: &mut ViewState,
+) -> ([egui::Rect; 5], egui::Rect) {
+    let mut columns = [egui::Rect::NOTHING; 5];
+    let max_height = (ui.available_height() - 160.0).max(140.0);
+    state.gop_list_height = state.gop_list_height.clamp(140.0, max_height);
+    help_text(
+        ui,
+        "Drag column dividers to resize columns; drag the bottom border to resize the list.",
+    );
+    egui::Frame::group(ui.style())
+        .inner_margin(4.0)
         .show(ui, |ui| {
-            for (pid, packets) in by_pid {
-                egui::CollapsingHeader::new(format!(
-                    "PID 0x{pid:04X} ({} access points)",
-                    packets.len()
-                ))
-                .default_open(true)
+            egui::ScrollArea::horizontal()
+                .id_salt("gop-table-horizontal")
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for packet in packets {
-                        key_value(ui, "Packet", format!("{packet} | PID 0x{pid:04X}"));
-                    }
+                    let width = state.gop_column_widths.iter().sum::<f32>() + 30.0;
+                    ui.set_min_width(width);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (column, title) in
+                            ["GOP #", "Length", "Program bytes", "Start packet", "Status"]
+                                .iter()
+                                .enumerate()
+                        {
+                            ui.add_sized(
+                                [state.gop_column_widths[column], 28.0],
+                                egui::Label::new(egui::RichText::new(*title).strong()).truncate(),
+                            )
+                            .on_hover_text(*title);
+                            let (_, response) =
+                                ui.allocate_exact_size(egui::vec2(6.0, 28.0), egui::Sense::drag());
+                            let response = response
+                                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                                .on_hover_text("Drag to resize this column");
+                            if response.hovered() || response.dragged() {
+                                ui.painter().vline(
+                                    response.rect.center().x,
+                                    response.rect.y_range(),
+                                    ui.visuals().selection.stroke,
+                                );
+                            }
+                            columns[column] = response.rect;
+                            if response.dragged() || response.drag_stopped() {
+                                state.gop_column_widths[column] = (state.gop_column_widths[column]
+                                    + ui.input(|i| i.pointer.delta().x))
+                                .clamp(55.0, 700.0);
+                            }
+                        }
+                    });
+                    ui.separator();
+                    let row_height = ui.text_style_height(&egui::TextStyle::Body).max(22.0) + 4.0;
+                    egui::ScrollArea::vertical()
+                        .id_salt("gop-table-rows")
+                        .max_height(state.gop_list_height)
+                        .auto_shrink([false, false])
+                        .show_rows(ui, row_height, video.gops.len(), |ui, rows| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            for index in rows {
+                                let gop = &video.gops[index];
+                                let values = [
+                                    index.to_string(),
+                                    gop.pictures.len().to_string(),
+                                    gop.program_ts_bytes
+                                        .map(|bytes| bytes.to_string())
+                                        .unwrap_or_else(|| "—".into()),
+                                    gop.first_packet.to_string(),
+                                    if gop.complete { "Complete" } else { "Partial" }.to_owned(),
+                                ];
+                                let fill = if index % 2 == 0 {
+                                    ui.visuals().faint_bg_color
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                };
+                                egui::Frame::new().fill(fill).show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        for (column, text) in values.iter().enumerate() {
+                                            let response = ui
+                                                .add_sized(
+                                                    [
+                                                        state.gop_column_widths[column] + 6.0,
+                                                        row_height,
+                                                    ],
+                                                    egui::Button::selectable(
+                                                        column == 0 && state.selected_gop == index,
+                                                        egui::RichText::new(text)
+                                                            .monospace()
+                                                            .color(value_color(ui)),
+                                                    )
+                                                    .truncate(),
+                                                )
+                                                .on_hover_text(text);
+                                            if response.clicked() {
+                                                state.selected_gop = index;
+                                            }
+                                        }
+                                    });
+                                });
+                            }
+                        });
                 });
-            }
         });
+    let handle = ResizeHandle::vertical(ui.available_width())
+        .thickness(10.0)
+        .hover_text("Drag to resize GOP list height")
+        .show(ui);
+    if handle.dragged() || handle.drag_stopped() {
+        state.gop_list_height =
+            (state.gop_list_height + ui.input(|i| i.pointer.delta().y)).clamp(140.0, max_height);
+    }
+    (columns, handle.rect)
 }
 
 pub fn gop(ui: &mut egui::Ui, report: &AnalysisReport, state: &mut ViewState) {
-    const PLOT_ID: &str = "gop";
-    ui.heading("Random access spacing");
-    ui.label("Each point is the distance from the preceding random_access_indicator on the same PID. It is measured in TS packets; this does not identify video frame types or prove a complete GOP.");
-    ui.horizontal(|ui| {
-        ui.label("PID:");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.graph_pid_filter)
-                .hint_text("all / 0x0101")
-                .desired_width(140.0),
-        );
-    });
-    graph_range_controls(ui, state, PLOT_ID);
-    let filter = match pid_filter(&state.graph_pid_filter) {
-        Ok(filter) => filter,
-        Err(error) => {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-            return;
-        }
-    };
-    let mut by_pid: BTreeMap<u16, Vec<u64>> = BTreeMap::new();
-    for &(packet, pid) in &report.random_access_points {
-        if filter.is_none_or(|wanted| wanted == pid) {
-            by_pid.entry(pid).or_default().push(packet);
-        }
+    ui.heading("GOP analysis");
+    if report.video_gops.is_empty() {
+        ui.label("No H.264 / H.265 pictures could be parsed.");
+        return;
     }
-    let total = by_pid.values().map(Vec::len).sum::<usize>();
-    key_value(ui, "random_access_indicator count", total.to_string());
-
-    let mut series = Vec::new();
-    egui::Grid::new("gop-statistics")
-        .striped(true)
-        .show(ui, |ui| {
-            for heading in [
-                "PID",
-                "Access points",
-                "Min spacing",
-                "Max spacing",
-                "Average",
-            ] {
-                ui.label(egui::RichText::new(heading).strong().color(item_color(ui)));
-            }
-            ui.end_row();
-            for (position, (pid, packets)) in by_pid.iter().enumerate() {
-                let points = packets
-                    .windows(2)
-                    .map(|pair| (pair[1] as f64, (pair[1] - pair[0]) as f64))
-                    .collect::<Vec<_>>();
-                if points.is_empty() {
-                    continue;
+    if state
+        .gop_pid
+        .is_none_or(|pid| !report.video_gops.contains_key(&pid))
+    {
+        state.gop_pid = report.video_gops.keys().next().copied();
+        state.selected_gop = state
+            .gop_pid
+            .and_then(|pid| report.video_gops.get(&pid))
+            .and_then(|v| v.gops.iter().position(|g| g.complete))
+            .unwrap_or(0);
+    }
+    egui::ComboBox::from_id_salt("gop-video-pid")
+        .selected_text(format!("Video PID 0x{:04X}", state.gop_pid.unwrap_or(0)))
+        .show_ui(ui, |ui| {
+            for &pid in report.video_gops.keys() {
+                if ui
+                    .selectable_value(&mut state.gop_pid, Some(pid), format!("0x{pid:04X}"))
+                    .changed()
+                {
+                    state.selected_gop = report
+                        .video_gops
+                        .get(&pid)
+                        .and_then(|v| v.gops.iter().position(|g| g.complete))
+                        .unwrap_or(0);
                 }
-                let mut gaps = points.iter().map(|point| point.1).collect::<Vec<_>>();
-                gaps.sort_by(f64::total_cmp);
-                let avg = gaps.iter().sum::<f64>() / gaps.len() as f64;
-                value_cell(ui, format!("0x{pid:04X}"));
-                value_cell(ui, packets.len().to_string());
-                value_cell(ui, format!("{:.0}", gaps[0]));
-                value_cell(ui, format!("{:.0}", gaps[gaps.len() - 1]));
-                value_cell(ui, format!("{avg:.1} TS packets"));
-                ui.end_row();
-                series.push(Series {
-                    name: format!("PID 0x{pid:04X} spacing"),
-                    color: contrast_color(ui, position),
-                    marker: PlotMarker::Diamond,
-                    details: packets
-                        .windows(2)
-                        .map(|pair| format!("Access points: packets {} and {}", pair[0], pair[1]))
-                        .collect(),
-                    points,
-                    connected: true,
-                    fill_baseline: None,
-                });
             }
         });
-
-    if ui.available_width() >= 900.0 {
-        ui.columns(2, |columns| {
-            plot(
-                &mut columns[0],
-                PLOT_ID,
-                "Access-point spacing in stream order",
-                "Second access-point packet",
-                "TS packets",
-                &series,
-                state,
+    let Some(video) = state.gop_pid.and_then(|pid| report.video_gops.get(&pid)) else {
+        return;
+    };
+    let complete = video.gops.iter().filter(|g| g.complete).collect::<Vec<_>>();
+    ui.label(format!(
+        "{}  ·  {} pictures  ·  {} complete GOPs",
+        if video.stream_type == 0x24 {
+            "H.265 / HEVC"
+        } else {
+            "H.264 / AVC"
+        },
+        video.frame_count,
+        complete.len()
+    ));
+    if !complete.is_empty() {
+        let min = complete.iter().map(|g| g.pictures.len()).min().unwrap_or(0);
+        let max = complete.iter().map(|g| g.pictures.len()).max().unwrap_or(0);
+        let avg =
+            complete.iter().map(|g| g.pictures.len()).sum::<usize>() as f64 / complete.len() as f64;
+        ui.label(format!(
+            "GOP Length: {min}–{max} pictures  ·  average {avg:.1}"
+        ));
+    }
+    help_text(
+        ui,
+        "I/IDR/CRA/BLA starts a GOP. Structure is in bitstream (decode) order. Partial or damaged GOPs are excluded from statistics and charts.",
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut state.gop_mode, 0, "GOP list");
+        ui.selectable_value(&mut state.gop_mode, 1, "GOP Length");
+        ui.selectable_value(&mut state.gop_mode, 2, "GOP Bytes");
+    });
+    if state.gop_mode == 0 {
+        help_text(
+            ui,
+            "Select a GOP to read its structure below. Packet positions are zero based.",
+        );
+        gop_table(ui, video, state);
+        if let Some(gop) = video
+            .gops
+            .get(state.selected_gop.min(video.gops.len().saturating_sub(1)))
+        {
+            ui.separator();
+            ui.strong(format!(
+                "GOP #{} · {} pictures",
+                state.selected_gop,
+                gop.pictures.len()
+            ));
+            ui.label("Structure (decode order)");
+            help_text(ui, "I/IDR/CRA/BLA: intra · P: predicted · B: bidirectional");
+            ui.horizontal_wrapped(|ui| {
+                for p in &gop.pictures {
+                    let color = match p.label() {
+                        "IDR" | "CRA" | "BLA" | "I" => egui::Color32::from_rgb(180, 95, 15),
+                        "P" => egui::Color32::from_rgb(0, 135, 155),
+                        "B" => egui::Color32::from_rgb(160, 80, 180),
+                        _ => ui.visuals().text_color(),
+                    };
+                    ui.colored_label(color, p.label());
+                }
+            });
+            if let Some(pts) = gop.start_pts {
+                help_text(ui, format!("Start PTS: {pts} ticks (90 kHz)"));
+            }
+            if let (Some(bytes), Some(next)) = (gop.program_ts_bytes, gop.next_packet) {
+                ui.label(format!(
+                    "Program TS: {bytes} bytes · packets {}–{next}, both boundaries included",
+                    gop.first_packet
+                ));
+            }
+            ui.label(format!(
+                "Compressed VCL: {} bytes ({:.3} KiB)",
+                gop.vcl_bytes,
+                gop.vcl_bytes as f64 / 1024.0
+            ));
+            help_text(
+                ui,
+                "VCL bytes contain compressed slices and NAL headers; exclude TS/PES headers, start codes and non-VCL NALs. ? means an undecodable picture type.",
             );
-            access_point_list(&mut columns[1], &by_pid);
-        });
+        }
     } else {
-        access_point_list(ui, &by_pid);
+        let bytes = state.gop_mode == 2;
+        if bytes {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Bytes:");
+                ui.selectable_value(&mut state.gop_vcl_bytes, false, "Program TS");
+                ui.selectable_value(&mut state.gop_vcl_bytes, true, "Compressed VCL");
+            });
+        }
+        let program_bytes = bytes && !state.gop_vcl_bytes;
+        if program_bytes {
+            let Some(number) = video.program_number else {
+                help_text(
+                    ui,
+                    "Program TS bytes need a unique PMT program for this video PID. Select Compressed VCL to inspect picture bytes.",
+                );
+                return;
+            };
+            help_text(
+                ui,
+                format!(
+                    "Program {number}: PAT, PMT, PCR and all elementary-stream TS packets, including headers and stuffing. Both GOP boundary packets are counted; each point is plotted at the next GOP start."
+                ),
+            );
+        } else if bytes {
+            help_text(
+                ui,
+                "Compressed VCL counts picture slices and NAL headers only. It excludes audio, filler NALs and transport overhead; plotted at the GOP start.",
+            );
+        }
+        let id = if program_bytes {
+            "gop-program-bytes"
+        } else if bytes {
+            "gop-vcl-bytes"
+        } else {
+            "gop-length"
+        };
+        graph_range_controls(ui, state, id);
+        let series = Series {
+            name: if program_bytes { "Program TS bytes" } else if bytes { "VCL bytes" } else { "Pictures" }.to_owned(),
+            color: contrast_color(ui, 0),
+            marker: PlotMarker::Diamond,
+            points: video
+                .gops
+                .iter()
+                .filter(|g| g.complete && (!program_bytes || g.program_ts_bytes.is_some()))
+                .map(|g| {
+                    (
+                        if program_bytes { g.next_packet.unwrap_or(g.first_packet) } else { g.first_packet } as f64,
+                        if program_bytes {
+                            g.program_ts_bytes.unwrap_or(0) as f64
+                        } else if bytes {
+                            g.vcl_bytes as f64
+                        } else {
+                            g.pictures.len() as f64
+                        },
+                    )
+                })
+                .collect(),
+            details: video
+                .gops
+                .iter()
+                .filter(|g| g.complete && (!program_bytes || g.program_ts_bytes.is_some()))
+                .map(|g| {
+                    format!(
+                        "Start packet {}; next GOP {}; program TS {} bytes (inclusive); VCL {} bytes; {}",
+                        g.first_packet,
+                        g.next_packet.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                        g.program_ts_bytes.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                        g.vcl_bytes,
+                        g.structure()
+                    )
+                })
+                .collect(),
+            connected: true,
+            fill_baseline: None,
+        };
         plot(
             ui,
-            PLOT_ID,
-            "Access-point spacing in stream order",
-            "Second access-point packet",
-            "TS packets",
-            &series,
+            id,
+            if bytes { "GOP Bytes" } else { "GOP Length" },
+            if program_bytes {
+                "Next GOP start: TS packet number (zero based)"
+            } else {
+                "GOP start: TS packet number (zero based)"
+            },
+            if program_bytes {
+                "Program TS (bytes)"
+            } else if bytes {
+                "Compressed VCL (bytes)"
+            } else {
+                "Pictures per GOP"
+            },
+            &[series],
             state,
         );
     }
@@ -3000,6 +3220,145 @@ mod view_tests {
         GraphView, HorizontalUnit, ViewState, elapsed_time_tick, format_bitrate_differences,
         zoom_view,
     };
+    use eframe::egui;
+
+    #[test]
+    fn rendered_gop_curve_uses_the_available_vertical_range() -> Result<(), &'static str> {
+        let context = egui::Context::default();
+        let values = [
+            589568.0, 589756.0, 589568.0, 589568.0, 589380.0, 589568.0, 590320.0, 589568.0,
+            589568.0, 589944.0, 589756.0, 589944.0, 589380.0, 589568.0, 589944.0, 589568.0,
+            589568.0, 589756.0, 589568.0, 589944.0,
+        ];
+        let series = super::Series {
+            name: "Program TS bytes".into(),
+            color: egui::Color32::BLUE,
+            marker: super::PlotMarker::Diamond,
+            points: values
+                .iter()
+                .enumerate()
+                .map(|(i, &y)| (i as f64 * 10000.0, y))
+                .collect(),
+            details: vec![],
+            connected: true,
+            fill_baseline: None,
+        };
+        let series = [series];
+        let mut state = ViewState::new();
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::plot(
+                    ui,
+                    "gop-program-bytes",
+                    "GOP Bytes",
+                    "Next GOP start: TS packet number (zero based)",
+                    "Program TS (bytes)",
+                    &series,
+                    &mut state,
+                )
+            },
+        );
+        output.textures_delta.clear();
+        let (clip, points) = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::Shape::Path(path) = &shape.shape
+                    && path.points.len() == values.len()
+                {
+                    Some((shape.clip_rect, &path.points))
+                } else {
+                    None
+                }
+            })
+            .ok_or("GOP curve was not drawn")?;
+        let top = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let bottom = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        let occupied = (bottom - top) / clip.height();
+        assert!(
+            occupied > 0.8 && occupied < 0.9,
+            "curve occupies {occupied:.3} of plot height"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gop_table_resizes_columns_and_height_with_pointer_drag() {
+        let context = egui::Context::default();
+        let video = tsan_analyzer::VideoGops {
+            stream_type: 0x1b,
+            program_number: None,
+            program_pids: vec![],
+            frame_count: 0,
+            gops: vec![],
+        };
+        let mut state = ViewState::new();
+        let mut geometry = ([egui::Rect::NOTHING; 5], egui::Rect::NOTHING);
+        let mut frame = |events, state: &mut ViewState| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 900.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut output = context.run_ui(input, |ui| {
+                geometry = super::gop_table(ui, &video, state);
+            });
+            output.textures_delta.clear();
+            geometry
+        };
+        let (columns, _) = frame(vec![], &mut state);
+        let start = columns[3].center();
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+            &mut state,
+        );
+        let end = start + egui::vec2(100.0, 0.0);
+        frame(vec![egui::Event::PointerMoved(end)], &mut state);
+        let (_, bottom) = frame(vec![press(end, false)], &mut state);
+        assert!(
+            state.gop_column_widths[3] > 180.0,
+            "width: {}",
+            state.gop_column_widths[3]
+        );
+        let start = bottom.center();
+        frame(
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+            &mut state,
+        );
+        let end = start + egui::vec2(0.0, 90.0);
+        frame(vec![egui::Event::PointerMoved(end)], &mut state);
+        frame(vec![press(end, false)], &mut state);
+        assert!(
+            state.gop_list_height > 350.0,
+            "height: {}",
+            state.gop_list_height
+        );
+    }
+
+    #[test]
+    fn bitrate_axis_keeps_headroom_above_38_mbps() {
+        let (low, high) = super::padded_axis_range(0.0, 38.810);
+        assert_eq!(low, 0.0);
+        assert!(high > 42.0);
+        let (low, high) = super::padded_axis_range(38.810, 38.810);
+        assert!(low < 38.810 && high > 38.810);
+    }
 
     #[test]
     fn graph_axis_defaults_to_time() {
@@ -3048,7 +3407,7 @@ mod view_tests {
     }
 
     #[test]
-    fn zoom_stops_both_axes_at_the_data_resolution_limit() {
+    fn zoom_stops_both_axes_at_the_data_resolution_limit() -> Result<(), &'static str> {
         let mut view = GraphView {
             x_from_percent: 0.0,
             x_to_percent: 100.0,
@@ -3065,7 +3424,7 @@ mod view_tests {
             1.0,
         );
         assert!((view.x_to_percent - view.x_from_percent - 1.0).abs() < f64::EPSILON);
-        let (low, high) = view.y_bounds.expect("zoom creates explicit Y bounds");
+        let (low, high) = view.y_bounds.ok_or("zoom creates explicit Y bounds")?;
         assert!((high - low - 2.0).abs() < f64::EPSILON);
 
         let limited = view;
@@ -3073,6 +3432,7 @@ mod view_tests {
         assert_eq!(view.x_from_percent, limited.x_from_percent);
         assert_eq!(view.x_to_percent, limited.x_to_percent);
         assert_eq!(view.y_bounds, limited.y_bounds);
+        Ok(())
     }
 
     #[test]

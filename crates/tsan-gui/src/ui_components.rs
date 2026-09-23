@@ -2,6 +2,19 @@ use std::ops::Range;
 
 use eframe::egui;
 
+/// Readable instructions shared by analysis, player and menus.
+pub fn help_text(ui: &mut egui::Ui, text: impl ToString) -> egui::Response {
+    let size = egui::TextStyle::Body.resolve(ui.style()).size.max(16.0);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text.to_string())
+                .size(size)
+                .color(ui.visuals().text_color()),
+        )
+        .wrap(),
+    )
+}
+
 const SCROLL_BAR_WIDTH: f32 = 16.0;
 const SCROLL_BAR_INNER_MARGIN: f32 = 2.0;
 const SCROLL_HANDLE_MIN_LENGTH: f32 = 36.0;

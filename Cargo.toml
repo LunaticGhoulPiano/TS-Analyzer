@@ -45,3 +45,13 @@ panic = "deny"
 
 [patch.crates-io]
 winit = { git = "https://github.com/LunaticGhoulPiano/winit.git", rev = "39c4009c41e5977d779cf8a365792c8153ca77c5" }
+
+# Keep interactive multi-file analysis fast in development builds too.
+[profile.dev.package.tsan-core]
+opt-level = 2
+
+[profile.dev.package.tsan-analyzer]
+opt-level = 2
+
+[profile.dev.package.tsan-tsduck-sys]
+opt-level = 2

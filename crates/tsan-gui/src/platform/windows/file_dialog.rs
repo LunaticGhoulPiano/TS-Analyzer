@@ -184,6 +184,10 @@ fn show_save_report_dialog(
                 pszName: w!("CBOR data"),
                 pszSpec: w!("*.cbor"),
             },
+            crate::report_export::ReportFormat::Xlsx => COMDLG_FILTERSPEC {
+                pszName: w!("Excel workbook"),
+                pszSpec: w!("*.xlsx"),
+            },
             crate::report_export::ReportFormat::Latex => COMDLG_FILTERSPEC {
                 pszName: w!("LaTeX source"),
                 pszSpec: w!("*.tex"),

@@ -7,3 +7,6 @@ pub use transport::{
 pub use transport_timeline::{
     TransportStreamSeekPoint, TransportStreamTimeline, index_transport_stream,
 };
+
+mod video_frames;
+pub use video_frames::{PictureType, VideoFrame, VideoFrameProbe};

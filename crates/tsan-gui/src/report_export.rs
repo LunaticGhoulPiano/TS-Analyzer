@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +11,7 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReportFormat {
     Cbor,
+    Xlsx,
     Latex,
     Pdf,
 }
@@ -18,6 +20,7 @@ impl ReportFormat {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Cbor => "Raw data (.cbor)",
+            Self::Xlsx => "Excel workbook (.xlsx)",
             Self::Latex => "LaTeX source (.tex + sections)",
             Self::Pdf => "Management PDF (.pdf)",
         }
@@ -26,6 +29,7 @@ impl ReportFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::Cbor => "cbor",
+            Self::Xlsx => "xlsx",
             Self::Latex => "tex",
             Self::Pdf => "pdf",
         }
@@ -58,6 +62,7 @@ pub fn export(
     match format {
         ReportFormat::Cbor => fs::write(destination, encode_cbor(inputs))
             .map_err(|error| format!("Could not write {}: {error}", destination.display())),
+        ReportFormat::Xlsx => crate::xlsx::export(destination, &encode_cbor(inputs)),
         ReportFormat::Latex => write_latex_bundle(destination, inputs, &sections_name(destination)),
         ReportFormat::Pdf => export_pdf(destination, inputs),
     }
@@ -68,53 +73,140 @@ fn sections_name(main: &Path) -> String {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("ts-analyzer_report");
-    format!("{stem}_sections")
+    format!(
+        "{}_sections",
+        stem.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
+}
+
+fn xelatex_command() -> Result<Command, String> {
+    let Some(root) = std::env::var_os("TSAN_TEX_ROOT").map(PathBuf::from) else {
+        return Ok(crate::os_integration::background_command("xelatex"));
+    };
+    let executable = root.join("bin/windows/xelatex.exe");
+    if !executable.is_file() {
+        return Err(format!(
+            "Bundled XeLaTeX is missing: {}",
+            executable.display()
+        ));
+    }
+    let mut runtime_id = std::hash::DefaultHasher::new();
+    root.hash(&mut runtime_id);
+    let cache = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or("LOCALAPPDATA is unavailable")?
+        .join("TS-Analyzer/cache/tex")
+        .join(format!("{:016x}", runtime_id.finish()));
+    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let mut command = crate::os_integration::background_command(executable);
+    command.env_clear();
+    for name in [
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "COMSPEC",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let windows = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .ok_or("SystemRoot is unavailable")?;
+    command
+        .env(
+            "PATH",
+            std::env::join_paths([root.join("bin/windows"), windows.join("System32")])
+                .map_err(|e| e.to_string())?,
+        )
+        .env("TEXMFROOT", &root)
+        .env("TEXMFCNF", root.join("texmf-dist/web2c"))
+        .env("TEXMFDIST", root.join("texmf-dist"))
+        .env("TEXMFSYSVAR", root.join("texmf-var"))
+        .env("TEXMFSYSCONFIG", root.join("texmf-config"))
+        .env("TEXMFLOCAL", root.join("empty"))
+        .env("TEXMFHOME", root.join("empty"))
+        .env("TEXMFVAR", &cache)
+        .env("TEXMFCONFIG", &cache)
+        .env(
+            "TEXMF",
+            format!(
+                "{{{}, {}}}",
+                root.join("texmf-dist").display(),
+                root.join("texmf-var").display()
+            )
+            .replace('\\', "/")
+            .replace(", ", ","),
+        )
+        .env(
+            "TEXFORMATS",
+            format!("{}//", root.join("texmf-var/web2c").display()).replace('\\', "/"),
+        );
+    let font_config = cache.join("fonts.conf");
+    let xml = |path: &Path| {
+        path.to_string_lossy()
+            .replace('\\', "/")
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('"', "&quot;")
+    };
+    fs::write(&font_config, format!(
+        "<?xml version=\"1.0\"?><!DOCTYPE fontconfig SYSTEM \"fonts.dtd\"><fontconfig><dir>{}</dir><dir>{}</dir><cachedir>{}</cachedir></fontconfig>",
+        xml(&windows.join("Fonts")), xml(&root.join("texmf-dist/fonts/opentype")), xml(&cache.join("fonts"))
+    )).map_err(|e| e.to_string())?;
+    command.env("FONTCONFIG_FILE", font_config);
+    Ok(command)
 }
 
 fn export_pdf(destination: &Path, inputs: &[ExportInput]) -> Result<(), String> {
-    let base = std::env::temp_dir();
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let directory = base.join(format!("tsan-report-{}-{nonce}", std::process::id()));
-    fs::create_dir(&directory).map_err(|error| error.to_string())?;
-    let main = directory.join("main.tex");
-    let result = (|| {
-        write_latex_bundle(&main, inputs, "sections")?;
-        for _ in 0..2 {
-            let output = Command::new("xelatex")
-                .current_dir(&directory)
-                .args([
-                    "-no-shell-escape",
-                    "-interaction=nonstopmode",
-                    "-halt-on-error",
-                    "main.tex",
-                ])
-                .output()
-                .map_err(|error| format!("XeLaTeX is required for PDF export: {error}"))?;
-            if !output.status.success() {
-                let log = String::from_utf8_lossy(&output.stdout);
-                let tail = log
-                    .lines()
+    let main = destination.with_extension("tex");
+    let section_dir = sections_name(&main);
+    write_latex_bundle(&main, inputs, &section_dir)?;
+    let parent = main.parent().ok_or("Report path has no parent")?;
+    let build = parent.join(&section_dir).join("build");
+    fs::create_dir_all(&build).map_err(|e| e.to_string())?;
+    for _ in 0..2 {
+        let output = xelatex_command()?
+            .current_dir(parent)
+            .args([
+                "-no-shell-escape",
+                "-recorder",
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                "-jobname=report",
+            ])
+            .arg(format!("-output-directory={}", build.display()))
+            .arg(main.file_name().ok_or("Missing report filename")?)
+            .output()
+            .map_err(|e| format!("XeLaTeX is required for PDF export: {e}"))?;
+        if !output.status.success() {
+            let log = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "XeLaTeX failed; source and build log retained in {}:\n{}",
+                build.display(),
+                log.lines()
                     .rev()
                     .take(16)
                     .collect::<Vec<_>>()
                     .into_iter()
                     .rev()
                     .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(format!("XeLaTeX failed:\n{tail}"));
-            }
+                    .join("\n")
+            ));
         }
-        fs::copy(directory.join("main.pdf"), destination)
-            .map_err(|error| format!("Could not save PDF {}: {error}", destination.display()))?;
-        Ok(())
-    })();
-    // This directory is created with a unique, explicit name directly under the system temp
-    // directory and contains only files produced by this export.
-    let _ = fs::remove_dir_all(&directory);
-    result
+    }
+    fs::copy(build.join("report.pdf"), destination).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn write_latex_bundle(
@@ -128,7 +220,7 @@ fn write_latex_bundle(
     let sections = parent.join(section_dir);
     fs::create_dir_all(&sections).map_err(|error| error.to_string())?;
     let mut preamble = String::from(
-        "\\documentclass[11pt,a4paper]{article}\n\\usepackage[margin=18mm]{geometry}\n\\usepackage{fontspec}\n\\setmainfont{Microsoft JhengHei}\n\\usepackage{longtable,booktabs,array,hyperref}\n\\usepackage{tikz}\n\\hypersetup{hidelinks}\n\\setcounter{tocdepth}{1}\n\\raggedbottom\n\\begin{document}\n\\title{Transport Stream Analysis}\n\\author{TS Analyzer}\n",
+        "\\documentclass[11pt,a4paper]{article}\n\\usepackage[margin=18mm]{geometry}\n\\usepackage{fontspec}\n\\IfFontExistsTF{Microsoft JhengHei}{\\setmainfont{Microsoft JhengHei}}{\\setmainfont{FandolSong-Regular.otf}[BoldFont=FandolSong-Bold.otf]}\n\\usepackage{longtable,booktabs,array,hyperref,graphicx}\n\\hypersetup{hidelinks}\n\\setcounter{tocdepth}{1}\n\\raggedbottom\n\\begin{document}\n\\title{Transport Stream Analysis}\n\\author{TS Analyzer}\n",
     );
     let _ = writeln!(preamble, "\\date{{{}}}\\maketitle", local_date());
     preamble.push_str("\\section*{Included files}\\begin{enumerate}\n");
@@ -151,12 +243,11 @@ fn write_latex_bundle(
         .map_err(|error| error.to_string())?;
     fs::write(sections.join("TR_101_290.tex"), tr101290_tex(inputs))
         .map_err(|error| error.to_string())?;
-    fs::write(sections.join("Graphs.tex"), graphs_tex(inputs))
-        .map_err(|error| error.to_string())?;
+    crate::report_graphics::write_sections(&sections, section_dir, inputs)?;
     Ok(())
 }
 
-fn tex(text: impl AsRef<str>) -> String {
+pub(crate) fn tex(text: impl AsRef<str>) -> String {
     let mut result = String::new();
     for ch in text.as_ref().chars() {
         match ch {
@@ -383,44 +474,6 @@ fn tr101290_tex(inputs: &[ExportInput]) -> String {
     output
 }
 
-fn graphs_tex(inputs: &[ExportInput]) -> String {
-    let mut output = String::from("\\section{Graphs}\n");
-    for input in inputs {
-        file_heading(&mut output, input);
-        let report = &input.report;
-        let pcr = report
-            .clock_points
-            .iter()
-            .filter(|point| point.kind == ClockKind::Pcr)
-            .count();
-        let pts = report
-            .clock_points
-            .iter()
-            .filter(|point| point.kind == ClockKind::Pts)
-            .count();
-        let dts = report
-            .clock_points
-            .iter()
-            .filter(|point| point.kind == ClockKind::Dts)
-            .count();
-        output.push_str("\\subsubsection{Bitrate}\n");
-        output.push_str("Rate per PCR requires a trustworthy PCR clock; no independent wall-clock bitrate is claimed.\\par\n");
-        output.push_str("\\subsubsection{PCR / PTS / DTS}\n");
-        let _ = writeln!(
-            output,
-            "Observed {} PCR, {} PTS and {} DTS samples.\\par",
-            pcr, pts, dts
-        );
-        output.push_str("\\subsubsection{GOP}\n");
-        let _ = writeln!(
-            output,
-            "{} TS random-access indicators observed; these are not verified IDR/IRAP frames.\\par",
-            report.random_access_points.len()
-        );
-    }
-    output
-}
-
 struct Cbor(Vec<u8>);
 
 impl Cbor {
@@ -474,7 +527,7 @@ fn encode_cbor(inputs: &[ExportInput]) -> Vec<u8> {
     let mut cbor = Cbor(Vec::new());
     cbor.map(3);
     cbor.uint(0);
-    cbor.uint(3); // schema version
+    cbor.uint(5); // schema version: explicit program TS bytes and closing GOP boundary
     cbor.uint(1);
     cbor.uint(
         SystemTime::now()
@@ -485,7 +538,7 @@ fn encode_cbor(inputs: &[ExportInput]) -> Vec<u8> {
     cbor.array(inputs.len());
     for input in inputs {
         let report = &input.report;
-        cbor.map(13);
+        cbor.map(15);
         cbor.uint(0);
         cbor.text(&input.path.to_string_lossy());
         cbor.uint(1);
@@ -640,6 +693,50 @@ fn encode_cbor(inputs: &[ExportInput]) -> Vec<u8> {
         cbor.text(compliance.hierarchy.system.label());
         cbor.text(compliance.hierarchy.signaling);
         cbor.text(compliance.hierarchy.delivery);
+        cbor.uint(13);
+        cbor.array(report.video_gops.len());
+        for (pid, video) in &report.video_gops {
+            cbor.array(6);
+            cbor.uint(u64::from(*pid));
+            cbor.uint(u64::from(video.stream_type));
+            cbor.uint(video.frame_count as u64);
+            cbor.array(video.gops.len());
+            for gop in &video.gops {
+                cbor.array(8);
+                cbor.uint(gop.first_packet);
+                cbor.optional(gop.start_pts);
+                cbor.uint(gop.pictures.len() as u64);
+                cbor.uint(gop.vcl_bytes);
+                cbor.bool(gop.complete);
+                cbor.text(&gop.structure());
+                cbor.optional(gop.next_packet);
+                cbor.optional(gop.program_ts_bytes);
+            }
+            cbor.optional(video.program_number.map(u64::from));
+            cbor.array(video.program_pids.len());
+            for &program_pid in &video.program_pids {
+                cbor.uint(u64::from(program_pid));
+            }
+        }
+        cbor.uint(14);
+        cbor.array(report.bitrate_windows.len());
+        let rates = tsan_analyzer::bitrate_series(report);
+        for (index, window) in report.bitrate_windows.iter().enumerate() {
+            cbor.array(4);
+            cbor.uint(window.first_packet);
+            cbor.uint(u64::from(window.packet_count));
+            cbor.map(window.pid_packets.len());
+            for (pid, count) in &window.pid_packets {
+                cbor.uint(u64::from(*pid));
+                cbor.uint(u64::from(*count));
+            }
+            if let Some(rate) = rates.as_ref().and_then(|r| r.window_mbps.get(index)) {
+                cbor.0.push(0xfb);
+                cbor.0.extend_from_slice(&rate.to_be_bytes());
+            } else {
+                cbor.0.push(0xf6);
+            }
+        }
     }
     cbor.0
 }
@@ -663,13 +760,13 @@ mod tests {
     }
 
     #[test]
-    fn exports_real_analysis_in_three_formats() {
+    fn exports_analysis_in_four_formats() -> Result<(), Box<dyn std::error::Error>> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_nanos());
         let directory =
             std::env::temp_dir().join(format!("tsan-export-test-{}-{nonce}", std::process::id()));
-        fs::create_dir(&directory).unwrap();
+        fs::create_dir(&directory)?;
         let source = directory.join("sample.ts");
         let mut bytes = Vec::new();
         for counter in 0..10 {
@@ -677,29 +774,35 @@ mod tests {
             packet[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10 | counter]);
             bytes.extend_from_slice(&packet);
         }
-        fs::write(&source, bytes).unwrap();
-        let report = tsan_analyzer::analyze_file(&source).unwrap();
+        fs::write(&source, bytes)?;
+        let report = tsan_analyzer::analyze_file(&source)?;
         let input = [ExportInput {
             path: source,
             report,
         }];
         let cbor = directory.join("report.cbor");
-        export(ReportFormat::Cbor, &cbor, &input).unwrap();
-        assert!(fs::metadata(&cbor).unwrap().len() > 20);
+        export(ReportFormat::Cbor, &cbor, &input)?;
+        assert!(fs::metadata(&cbor)?.len() > 20);
+        let xlsx = directory.join("report.xlsx");
+        export(ReportFormat::Xlsx, &xlsx, &input)?;
+        assert!(fs::metadata(xlsx)?.len() > 1000);
         let latex = directory.join("report.tex");
-        export(ReportFormat::Latex, &latex, &input).unwrap();
+        export(ReportFormat::Latex, &latex, &input)?;
         for name in [
             "Overview.tex",
             "PSI_SI_Tree.tex",
             "TR_101_290.tex",
             "Graphs.tex",
+            "Bitrate.tex",
+            "Timestamps.tex",
+            "GOP.tex",
         ] {
             assert!(directory.join("report_sections").join(name).is_file());
         }
         if Command::new("xelatex").arg("--version").output().is_ok() {
             let pdf = directory.join("report.pdf");
-            export(ReportFormat::Pdf, &pdf, &input).unwrap();
-            assert!(fs::metadata(&pdf).unwrap().len() > 1000);
+            export(ReportFormat::Pdf, &pdf, &input)?;
+            assert!(fs::metadata(&pdf)?.len() > 1000);
         }
         if std::env::var_os("TSAN_REPORT_KEEP_TEST").is_some() {
             println!(
@@ -707,7 +810,57 @@ mod tests {
                 directory.join("report.pdf").display()
             );
         } else {
-            fs::remove_dir_all(directory).unwrap();
+            fs::remove_dir_all(directory)?;
         }
+        Ok(())
+    }
+    #[test]
+    #[ignore = "exports local recordings; set TSAN_REPORT_TS_DIR and TSAN_REPORT_OUTPUT"]
+    fn export_recordings() -> Result<(), Box<dyn std::error::Error>> {
+        let directory =
+            std::env::var_os("TSAN_REPORT_TS_DIR").ok_or("Missing TSAN_REPORT_TS_DIR")?;
+        let output = PathBuf::from(
+            std::env::var_os("TSAN_REPORT_OUTPUT").ok_or("Missing TSAN_REPORT_OUTPUT")?,
+        );
+        fs::create_dir_all(&output)?;
+        let mut paths = fs::read_dir(directory)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ts")))
+            .collect::<Vec<_>>();
+        paths.sort();
+        if let Ok(filter) = std::env::var("TSAN_REPORT_FILTER") {
+            paths.retain(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&filter))
+            });
+        }
+        for path in paths {
+            let stem = path
+                .file_stem()
+                .ok_or("Missing stem")?
+                .to_string_lossy()
+                .into_owned();
+            let input = [ExportInput {
+                report: tsan_analyzer::analyze_file(&path)?,
+                path,
+            }];
+            for format in [ReportFormat::Cbor, ReportFormat::Xlsx, ReportFormat::Latex] {
+                export(
+                    format,
+                    &output.join(format!("{stem}.{}", format.extension())),
+                    &input,
+                )?;
+            }
+            if stem.starts_with("M25") {
+                export(
+                    ReportFormat::Pdf,
+                    &output.join(format!("{stem}.pdf")),
+                    &input,
+                )?;
+            }
+            println!("Export verified: {stem}");
+        }
+        Ok(())
     }
 }

@@ -14,10 +14,16 @@ pub use video::VideoMetadata;
 
 pub use transport::{
     AnalysisReport, BroadcastStandard, MediaInformation, NativeSummary, PidReport, ProgramReport,
-    StreamReport, analyze_file,
+    StreamReport, analyze_file, analyze_file_with_progress,
 };
 
 pub use compliance::{
     ComplianceFamily, ComplianceHierarchy, ComplianceIndicator, ComplianceProfile,
     ComplianceReport, ComplianceStatus, ComplianceSystem, StandardReference, tr101290_report,
 };
+
+mod gop;
+pub use gop::{Gop, VideoGops};
+
+mod bitrate;
+pub use bitrate::{BitrateSeries, bitrate_series};

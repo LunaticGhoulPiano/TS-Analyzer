@@ -22,9 +22,6 @@ use crate::{
     PlayerState, ProgramSelection, VideoRectangle, VideoSurface,
 };
 
-const PTS_WRAP_NS: u64 = 95_443_717_688_888;
-const MAX_FRAME_FORWARD_NS: u64 = 10_000_000_000;
-const MAX_FRAME_REORDER_NS: u64 = 1_000_000_000;
 const FEED_PACKETS_PER_BUFFER: usize = 256;
 const TRANSPORT_PROBE_BYTES: usize = 64 * 1024;
 const MIN_GSTREAMER_MAJOR: u32 = 1;
@@ -274,13 +271,13 @@ struct PipelineContext {
     video_target: Arc<Mutex<VideoTarget>>,
     video_pad_linked: Arc<AtomicBool>,
     transport_probe: TransportStreamProbe,
+    timeline: Option<TransportStreamTimeline>,
 }
 
 #[derive(Clone, Copy)]
 struct ActiveSeek {
     seqnum: gst::Seqnum,
     target: Duration,
-    source_position: Duration,
     source_offset: u64,
     source_reset_received: bool,
     issued_at: Instant,
@@ -291,9 +288,9 @@ struct ActiveSeek {
 #[derive(Default)]
 struct PlaybackPositionTracker {
     active_seek: Option<ActiveSeek>,
-    last_raw_pts_ns: Option<u64>,
     stable_position: Duration,
     last_frame_position: Option<Duration>,
+    segment: Option<gst::FormattedSegment<gst::ClockTime>>,
 }
 
 impl PlaybackPositionTracker {
@@ -301,15 +298,14 @@ impl PlaybackPositionTracker {
         &mut self,
         seqnum: gst::Seqnum,
         target: Duration,
-        source_position: Duration,
+        _source_position: Duration,
         source_offset: u64,
         recovery_attempts: u8,
     ) -> Option<ActiveSeek> {
-        self.last_raw_pts_ns = None;
+        self.segment = None;
         self.active_seek.replace(ActiveSeek {
             seqnum,
             target,
-            source_position,
             source_offset,
             source_reset_received: false,
             issued_at: Instant::now(),
@@ -345,65 +341,27 @@ impl PlaybackPositionTracker {
         let Some(pts) = pts else {
             return !self.is_seek_in_flight();
         };
-        let raw_pts_ns = pts.nseconds();
-        let seek_position = self.active_seek.and_then(|active| {
-            (!active.frame_received
-                && self.last_raw_pts_ns.is_none()
-                && active.source_reset_received)
-                .then_some(active.source_position)
-        });
-        if self.active_seek.is_some() && self.last_raw_pts_ns.is_none() && seek_position.is_none() {
+        let Some(position) = self
+            .segment
+            .as_ref()
+            .and_then(|segment| segment.to_stream_time(pts))
+        else {
             return false;
-        }
-
-        if let Some(position) = seek_position {
-            self.last_raw_pts_ns = Some(raw_pts_ns);
-            self.stable_position = position;
-            self.last_frame_position = Some(position);
-            let reached_target = self
-                .active_seek
-                .is_none_or(|active| position >= active.target);
-            if let Some(active) = self.active_seek.as_mut() {
-                active.frame_received = reached_target;
-            }
-            return reached_target;
-        }
-        let Some(previous_raw_pts_ns) = self.last_raw_pts_ns else {
-            self.last_raw_pts_ns = Some(raw_pts_ns);
-            self.stable_position = Duration::ZERO;
-            self.last_frame_position = Some(Duration::ZERO);
-            return true;
         };
-        let forward = (raw_pts_ns + PTS_WRAP_NS - previous_raw_pts_ns) % PTS_WRAP_NS;
-        let backward = (previous_raw_pts_ns + PTS_WRAP_NS - raw_pts_ns) % PTS_WRAP_NS;
-        if forward <= MAX_FRAME_FORWARD_NS {
-            self.stable_position = self
-                .stable_position
-                .saturating_add(Duration::from_nanos(forward));
-            self.last_raw_pts_ns = Some(raw_pts_ns);
-            self.last_frame_position = Some(self.stable_position);
-        } else if backward <= MAX_FRAME_REORDER_NS {
-            self.last_frame_position = Some(
-                self.stable_position
-                    .saturating_sub(Duration::from_nanos(backward)),
-            );
-        }
-        let reached_target = self.active_seek.is_some_and(|active| {
-            self.last_frame_position
-                .is_some_and(|position| position >= active.target)
-        });
-        if reached_target && let Some(active) = self.active_seek.as_mut() {
+        let position = Duration::from_nanos(position.nseconds());
+        if let Some(active) = self.active_seek.as_mut() {
+            if !active.source_reset_received || position < active.target {
+                return false;
+            }
             active.frame_received = true;
         }
-        !self.is_seek_in_flight()
+        self.stable_position = position;
+        self.last_frame_position = Some(position);
+        true
     }
 
     fn frame_position(&self, duration: Option<Duration>) -> Option<Duration> {
-        let position = self
-            .active_seek
-            .filter(|active| !active.frame_received)
-            .map(|active| active.target)
-            .or(self.last_frame_position)?;
+        let position = self.last_frame_position?;
         Some(duration.map_or(position, |duration| position.min(duration)))
     }
 
@@ -413,8 +371,10 @@ impl PlaybackPositionTracker {
     }
 
     fn can_start_pending_seek(&self) -> bool {
-        self.active_seek
-            .is_none_or(|active| active.issued_at.elapsed() >= SEEK_SUPERSEDE_TIMEOUT)
+        self.last_frame_position.is_some()
+            && self.active_seek.is_none_or(|active| {
+                active.frame_received || active.issued_at.elapsed() >= SEEK_SUPERSEDE_TIMEOUT
+            })
     }
 
     fn is_stale_eos(&self, seqnum: gst::Seqnum, pending_seek: bool) -> bool {
@@ -663,6 +623,10 @@ impl GstreamerPlayerBackend {
         })?;
         let transport_probe = probe_input(&mut input_file, input)?;
 
+        let timeline = File::open(input)
+            .ok()
+            .and_then(|file| index_transport_stream(file, transport_probe).ok())
+            .flatten();
         let elements = BackendElements::for_selection(self.kind);
         let (source_error_sender, source_error_receiver) = mpsc::sync_channel(8);
         let input_size = i64::try_from(
@@ -692,8 +656,8 @@ impl GstreamerPlayerBackend {
         let source_element = gst::ElementFactory::make("appsrc")
             .name("source")
             .property("caps", source_caps)
-            .property("format", gst::Format::Bytes)
-            .property("stream-type", gst_app::AppStreamType::RandomAccess)
+            .property("format", gst::Format::Time)
+            .property("stream-type", gst_app::AppStreamType::Seekable)
             .property("size", input_size)
             .property("block", true)
             .property("max-bytes", 32_u64 * 1024 * 1024)
@@ -716,6 +680,7 @@ impl GstreamerPlayerBackend {
             transport_probe.stream_start_offset() as u64,
             source_error_sender.clone(),
             Arc::clone(&self.position_tracker),
+            timeline.clone(),
         );
 
         let source_queue = create_playback_queue("source-queue")?;
@@ -733,6 +698,7 @@ impl GstreamerPlayerBackend {
         let demux = gst::ElementFactory::make("tsdemux")
             .name("demux")
             .property("program-number", program_number)
+            .property("ignore-pcr", true)
             .property("latency", 0_i32)
             .property("skew-corrections", false)
             .build()
@@ -784,6 +750,7 @@ impl GstreamerPlayerBackend {
             video_target,
             video_pad_linked,
             transport_probe,
+            timeline,
         })
     }
 
@@ -893,9 +860,9 @@ impl GstreamerPlayerBackend {
             1.0,
             gst::SeekFlags::FLUSH,
             gst::SeekType::Set,
-            gst::format::Bytes::from_bytes(seek_point.byte_offset()),
+            gst::ClockTime::from_nseconds(position.as_nanos().min(u128::from(u64::MAX)) as u64),
             gst::SeekType::None,
-            gst::format::Bytes::NONE,
+            gst::ClockTime::NONE,
         )
         .seqnum(seqnum)
         .build();
@@ -907,7 +874,11 @@ impl GstreamerPlayerBackend {
                 seqnum,
                 position,
                 seek_point.position(),
-                seek_point.byte_offset(),
+                if position.is_zero() {
+                    0
+                } else {
+                    seek_point.byte_offset()
+                },
                 recovery_attempts,
             );
         if !context.pipeline.send_event(seek_event) {
@@ -924,6 +895,17 @@ impl GstreamerPlayerBackend {
     }
 
     fn apply_pending_seek_if_ready(&mut self) -> PlayerResult<()> {
+        // Dynamic demux pads and sink preroll must exist before a seek can propagate.
+        if self.pipeline.as_ref().is_none_or(|c| {
+            !c.video_pad_linked.load(Ordering::Acquire)
+                || !matches!(
+                    c.pipeline.current_state(),
+                    gst::State::Paused | gst::State::Playing
+                )
+        }) {
+            return Ok(());
+        }
+
         let can_start = self
             .position_tracker
             .lock()
@@ -1013,10 +995,7 @@ impl PlayerBackend for GstreamerPlayerBackend {
 
         match self.build_pipeline(input, self.selection) {
             Ok(pipeline) => {
-                self.timeline = File::open(input)
-                    .ok()
-                    .and_then(|file| index_transport_stream(file, pipeline.transport_probe).ok())
-                    .flatten();
+                self.timeline = pipeline.timeline.clone();
                 self.input = Some(input.to_path_buf());
                 self.decoder_identity = None;
                 self.transport_probe = Some(pipeline.transport_probe);
@@ -1100,7 +1079,23 @@ impl PlayerBackend for GstreamerPlayerBackend {
     }
 
     fn position(&self) -> Option<Duration> {
-        self.pipeline.as_ref()?;
+        let context = self.pipeline.as_ref()?;
+        if let Some(sink) = context.pipeline.by_name("video-sink")
+            && let Some(sample) = sink.property::<Option<gst::Sample>>("last-sample")
+            && let Some(segment) = sample
+                .segment()
+                .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+            && let Some(time) = sample
+                .buffer()
+                .and_then(|b| b.pts())
+                .and_then(|p| segment.to_stream_time(p))
+        {
+            let actual = Duration::from_nanos(time.nseconds());
+            return Some(
+                self.duration()
+                    .map_or(actual, |duration| actual.min(duration)),
+            );
+        }
         let tracker = self
             .position_tracker
             .lock()
@@ -1244,6 +1239,20 @@ impl PlayerBackend for GstreamerPlayerBackend {
                     }
 
                     let duration = self.duration();
+                    let end_seek = self
+                        .position_tracker
+                        .lock()
+                        .ok()
+                        .and_then(|t| t.active_seek)
+                        .is_some_and(|a| {
+                            a.seqnum == message.seqnum()
+                                && duration.is_some_and(|d| {
+                                    a.target.saturating_add(SEEK_END_TOLERANCE) >= d
+                                })
+                        });
+                    if end_seek {
+                        return self.handle_end_of_stream();
+                    }
                     let recovery = self
                         .position_tracker
                         .lock()
@@ -1336,8 +1345,8 @@ fn create_video_sink(
     let result = match kind {
         PlayerBackendKind::D3d12 => builder
             .property("fullscreen-on-alt-enter", false)
-            .property("external-window-only", true)
-            .property("direct-swapchain", true)
+            .property("external-window-only", !cfg!(test))
+            .property("direct-swapchain", !cfg!(test))
             .build(),
         PlayerBackendKind::D3d11 => builder
             .property_from_str("fullscreen-toggle-mode", "none")
@@ -1695,18 +1704,28 @@ fn create_and_link_video_branch(
             "video sink does not expose a static sink pad",
         )
     })?;
-    let _probe_id = sink_pad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
-        if let Some(buffer) = info.buffer()
-            && let Ok(mut tracker) = position_tracker.lock()
-        {
-            let _target_reached = tracker.observe_frame(buffer.pts());
-        }
-        // The real D3D sink must receive the preroll frames between the indexed
-        // random-access point and the requested presentation time. Dropping them
-        // here can leave its post-flush preroll incomplete, so the pipeline stays
-        // nominally Playing while the displayed frame never advances.
-        gst::PadProbeReturn::Ok
-    });
+    let _probe_id = sink_pad.add_probe(
+        gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+        move |_pad, info| {
+            if let Some(event) = info.event()
+                && let gst::EventView::Segment(segment) = event.view()
+                && let Some(time_segment) = segment.segment().downcast_ref::<gst::ClockTime>()
+                && let Ok(mut tracker) = position_tracker.lock()
+            {
+                tracker.segment = Some(time_segment.clone());
+            }
+            if let Some(buffer) = info.buffer()
+                && let Ok(mut tracker) = position_tracker.lock()
+            {
+                let _target_reached = tracker.observe_frame(buffer.pts());
+            }
+            // The real D3D sink must receive the preroll frames between the indexed
+            // random-access point and the requested presentation time. Dropping them
+            // here can leave its post-flush preroll incomplete, so the pipeline stays
+            // nominally Playing while the displayed frame never advances.
+            gst::PadProbeReturn::Ok
+        },
+    );
 
     *video_overlay
         .lock()
@@ -1749,6 +1768,7 @@ fn update_video_info_from_caps(media_info: &mut GstreamerMediaInfo, caps: &gst::
             });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configure_app_source(
     app_src: &gst_app::AppSrc,
     input_file: File,
@@ -1757,7 +1777,15 @@ fn configure_app_source(
     stream_start_offset: u64,
     error_sender: SyncSender<PlayerError>,
     position_tracker: Arc<Mutex<PlaybackPositionTracker>>,
+    timeline: Option<TransportStreamTimeline>,
 ) {
+    if let Some(timeline) = &timeline {
+        app_src.set_duration(gst::ClockTime::from_nseconds(
+            timeline.duration().as_nanos() as u64,
+        ));
+    }
+    let first_timestamp = Arc::new(Mutex::new(Some(Duration::ZERO)));
+    let read_timestamp = Arc::clone(&first_timestamp);
     let input_file = Arc::new(Mutex::new(input_file));
     let read_file = Arc::clone(&input_file);
     let seek_file = input_file;
@@ -1769,8 +1797,20 @@ fn configure_app_source(
             .need_data(move |source, requested_bytes| {
                 match read_source_buffer(&read_file, requested_bytes, packet_size, &read_input_name)
                 {
-                    Ok(Some(buffer)) => {
+                    Ok(Some(mut buffer)) => {
+                        if let Some(time) = read_timestamp
+                            .lock()
+                            .ok()
+                            .and_then(|mut value| value.take())
+                        {
+                            buffer
+                                .make_mut()
+                                .set_pts(gst::ClockTime::from_nseconds(time.as_nanos() as u64));
+                        }
                         if let Err(error) = source.push_buffer(buffer) {
+                            if matches!(error, gst::FlowError::Flushing) {
+                                return;
+                            }
                             report_source_error(
                                 &read_error_sender,
                                 backend_failure("appsrc failed to push a TS buffer", error),
@@ -1791,7 +1831,25 @@ fn configure_app_source(
                     }
                 }
             })
-            .seek_data(move |_source, offset| {
+            .seek_data(move |_source, time| {
+                let point = timeline
+                    .as_ref()
+                    .and_then(|t| t.seek_point(Duration::from_nanos(time)));
+                if time != 0 && point.is_none() {
+                    return false;
+                }
+                let offset = if time == 0 {
+                    0
+                } else {
+                    point.map_or(0, |p| p.byte_offset())
+                };
+                if let Ok(mut timestamp) = first_timestamp.lock() {
+                    *timestamp = Some(if time == 0 {
+                        Duration::ZERO
+                    } else {
+                        point.map_or(Duration::ZERO, |p| p.decode_position())
+                    });
+                }
                 let result = seek_source_file(
                     &seek_file,
                     offset,
@@ -1954,6 +2012,8 @@ fn message_source(message: &gst::MessageRef) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{PlayerBackend, PlayerState};
+    use gst::prelude::*;
     use std::time::{Duration, Instant};
 
     use super::super::{GpuAdapterSelection, PlayerBackendKind};
@@ -2000,6 +2060,143 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "plays local TS files on a real D3D sink; set TSAN_TEST_TS_DIR"]
+    fn real_files_seek_to_presented_frames() -> Result<(), Box<dyn std::error::Error>> {
+        let directory =
+            std::env::var_os("TSAN_TEST_TS_DIR").ok_or("TSAN_TEST_TS_DIR is required")?;
+        let mut paths = std::fs::read_dir(directory)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ts")))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let mut player =
+                GstreamerPlayerBackend::new(if std::env::var_os("TSAN_TEST_D3D11").is_some() {
+                    PlayerBackendKind::D3d11
+                } else {
+                    PlayerBackendKind::D3d12
+                })?;
+            player.load(&path)?;
+            player.play()?;
+            let duration = player.duration().ok_or("No duration")?;
+            for fraction in [0.30, 0.70, 0.15, 0.85] {
+                player.pause()?;
+                let target = duration.mul_f64(fraction);
+                let started = Instant::now();
+                player.seek(duration.mul_f64(0.05))?;
+                player.seek(target)?;
+                loop {
+                    player.poll_event()?;
+                    if player.state() == PlayerState::Failed {
+                        return Err(format!("Playback failed: {}", path.display()).into());
+                    }
+                    let context = player.pipeline.as_ref().ok_or("No pipeline")?;
+
+                    if let Some(sink) = context.pipeline.by_name("video-sink")
+                        && let Some(sample) = sink.property::<Option<gst::Sample>>("last-sample")
+                        && let Some(segment) = sample
+                            .segment()
+                            .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+                        && let Some(time) = sample
+                            .buffer()
+                            .and_then(|b| b.pts())
+                            .and_then(|p| segment.to_stream_time(p))
+                    {
+                        let actual = time.seconds_f64();
+                        let ready = player
+                            .position_tracker
+                            .lock()
+                            .map(|t| !t.is_seek_in_flight())
+                            .unwrap_or(false);
+                        if ready && (actual - target.as_secs_f64()).abs() < 0.10 {
+                            eprintln!(
+                                "{} seek {:.3}s -> {:.3}s in {}ms",
+                                path.file_name().unwrap_or_default().to_string_lossy(),
+                                target.as_secs_f64(),
+                                actual,
+                                started.elapsed().as_millis()
+                            );
+                            break;
+                        }
+                    }
+                    if started.elapsed() > Duration::from_secs(6) {
+                        return Err(format!(
+                            "{} seek {:.3}s timed out; position {:?}",
+                            path.display(),
+                            target.as_secs_f64(),
+                            (
+                                player.position(),
+                                context.pipeline.state(gst::ClockTime::ZERO),
+                                player
+                                    .position_tracker
+                                    .lock()
+                                    .ok()
+                                    .and_then(|t| t.segment.clone()),
+                                context
+                                    .pipeline
+                                    .by_name("video-sink")
+                                    .map(|s| s.property::<Option<gst::Sample>>("last-sample"))
+                            )
+                        )
+                        .into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                player.play()?;
+                std::thread::sleep(Duration::from_millis(250));
+                player.poll_event()?;
+                let resumed = player.position().ok_or("No rendered playback position")?;
+                if resumed < target + Duration::from_millis(30)
+                    || resumed > target + Duration::from_secs(1)
+                {
+                    return Err(format!("Resume did not advance at normal speed: target {target:?}, displayed {resumed:?}").into());
+                }
+            }
+
+            if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("M25"))
+            {
+                player.pause()?;
+                player.seek(Duration::ZERO)?;
+                let started = Instant::now();
+                loop {
+                    player.poll_event()?;
+                    if player.pending_seek.is_none()
+                        && player
+                            .position_tracker
+                            .lock()
+                            .map(|t| !t.is_seek_in_flight())
+                            .unwrap_or(false)
+                        && player
+                            .position()
+                            .is_some_and(|p| p < Duration::from_secs(2))
+                    {
+                        break;
+                    }
+                    if started.elapsed() > Duration::from_secs(6) {
+                        return Err("Seek to beginning timed out".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                player.seek(duration)?;
+                player.play()?;
+                let started = Instant::now();
+                while player.state() != PlayerState::Stopped {
+                    player.poll_event()?;
+                    if started.elapsed() > Duration::from_secs(6) {
+                        return Err("Seek to end timed out".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            player.stop()?;
+        }
+        Ok(())
+    }
+
     fn assert_send<T: Send>() {}
 
     #[test]
@@ -2007,102 +2204,54 @@ mod tests {
         assert_send::<GstreamerPlayerBackend>();
     }
 
-    #[test]
-    fn seek_waits_for_the_indexed_source_reset_and_target_frame() {
-        let mut tracker = PlaybackPositionTracker::default();
-        tracker.observe_frame(Some(gst::ClockTime::from_seconds(2)));
-        assert_eq!(tracker.frame_position(None), Some(Duration::ZERO));
-
-        let seqnum = gst::Seqnum::next();
-        tracker.begin_seek(
-            seqnum,
-            Duration::from_millis(46_500),
-            Duration::from_secs(45),
-            1_880,
-            0,
-        );
-        assert!(tracker.is_seek_in_flight());
-        assert!(tracker.is_stale_eos(seqnum, false));
-        tracker.observe_source_seek(3_760);
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(3))));
-        tracker.observe_source_seek(1_880);
-        assert!(tracker.is_seek_in_flight());
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_mseconds(48_500))));
-        assert!(tracker.is_seek_in_flight());
-        assert!(tracker.is_stale_eos(seqnum, false));
-        assert_eq!(
-            tracker.frame_position(Some(Duration::from_secs(100))),
-            Some(Duration::from_millis(46_500))
-        );
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_mseconds(48_600))));
-        assert_eq!(
-            tracker.frame_position(None),
-            Some(Duration::from_millis(46_500))
-        );
-        assert!(tracker.observe_frame(Some(gst::ClockTime::from_mseconds(50_000))));
-        assert!(!tracker.is_seek_in_flight());
-        assert!(!tracker.can_start_pending_seek());
-        assert!(!tracker.is_stale_eos(seqnum, false));
-        assert_eq!(
-            tracker.frame_position(None),
-            Some(Duration::from_millis(46_500))
-        );
+    fn segment_at(seconds: u64) -> gst::FormattedSegment<gst::ClockTime> {
+        let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        segment.set_start(gst::ClockTime::from_seconds(seconds + 2));
+        segment.set_time(gst::ClockTime::from_seconds(seconds));
+        segment
     }
-
     #[test]
-    fn frame_timeline_ignores_old_source_resets_and_clamps_duration() {
-        let mut tracker = PlaybackPositionTracker::default();
-        tracker.observe_frame(Some(gst::ClockTime::from_seconds(2)));
-
-        let first_seqnum = gst::Seqnum::next();
+    fn seek_reports_only_a_frame_in_the_new_time_segment() -> Result<(), gst::glib::Error> {
+        gst::init()?;
+        let mut tracker = PlaybackPositionTracker {
+            segment: Some(segment_at(0)),
+            ..Default::default()
+        };
+        assert!(tracker.observe_frame(Some(gst::ClockTime::from_seconds(5))));
+        assert_eq!(tracker.frame_position(None), Some(Duration::from_secs(3)));
+        let seq = gst::Seqnum::next();
         tracker.begin_seek(
-            first_seqnum,
-            Duration::from_secs(80),
-            Duration::from_secs(79),
-            1_880,
+            seq,
+            Duration::from_secs(46),
+            Duration::from_secs(45),
+            1880,
             0,
         );
-        assert!(tracker.observe_async_done(first_seqnum));
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(82))));
-        tracker.observe_source_seek(1_880);
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(82))));
+        tracker.observe_source_seek(3760);
+        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(48))));
+        assert_eq!(tracker.frame_position(None), Some(Duration::from_secs(3)));
+        tracker.observe_source_seek(1880);
+        tracker.segment = Some(segment_at(46));
+        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(47))));
+        assert!(tracker.observe_frame(Some(gst::ClockTime::from_mseconds(48_020))));
         assert_eq!(
-            tracker.frame_position(Some(Duration::from_secs(90))),
-            Some(Duration::from_secs(80))
+            tracker.frame_position(None),
+            Some(Duration::from_millis(46_020))
         );
-        assert!(tracker.observe_frame(Some(gst::ClockTime::from_seconds(83))));
-
-        let second_seqnum = gst::Seqnum::next();
-        tracker.begin_seek(
-            second_seqnum,
-            Duration::from_secs(20),
-            Duration::from_secs(19),
-            3_760,
-            0,
-        );
-        tracker.observe_source_seek(1_880);
-        assert!(tracker.is_seek_in_flight());
-        assert!(tracker.observe_async_done(second_seqnum));
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(22))));
-        tracker.observe_source_seek(3_760);
-        assert!(!tracker.observe_frame(Some(gst::ClockTime::from_seconds(22))));
+        assert!(!tracker.is_seek_in_flight());
         assert_eq!(
-            tracker.frame_position(Some(Duration::from_secs(90))),
-            Some(Duration::from_secs(20))
+            tracker.frame_position(Some(Duration::from_secs(40))),
+            Some(Duration::from_secs(40))
         );
-        assert!(tracker.observe_frame(Some(gst::ClockTime::from_seconds(23))));
-        tracker.observe_frame(Some(gst::ClockTime::from_seconds(24)));
-        assert_eq!(
-            tracker.frame_position(Some(Duration::from_secs(20))),
-            Some(Duration::from_secs(20))
-        );
-        assert!(tracker.is_stale_eos(first_seqnum, false));
-        assert!(!tracker.is_stale_eos(second_seqnum, false));
+        Ok(())
     }
 
     #[test]
     fn stuck_seek_can_be_superseded_after_timeout() {
-        let mut tracker = PlaybackPositionTracker::default();
+        let mut tracker = PlaybackPositionTracker {
+            last_frame_position: Some(Duration::ZERO),
+            ..Default::default()
+        };
         let seqnum = gst::Seqnum::next();
         tracker.begin_seek(
             seqnum,

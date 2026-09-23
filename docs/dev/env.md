@@ -39,7 +39,7 @@ cargo run --locked -p tsan-gui
   - 上面的 `export` 僅對該 Git Bash 工作階段有效。若 TSDuck 不在預設位置、且 VS Code 不是從該工作階段啟動，請將 `TSDUCK_HOME` 設為 Windows 使用者環境變數後重新啟動 VS Code；C++ IntelliSense 才能找到 TSDuck 標頭。`bridge.cpp` 只使用標頭名稱（例如 `#include "tsTSPacket.h"`），不在 `#include` 中放絕對或跨目錄相對路徑。
   - 若 GStreamer 探測失敗，確認 development 套件的 `lib/pkgconfig` 可由 `PKG_CONFIG_PATH` 找到；若啟動時缺 DLL 或 plugin，確認相同 MSVC x64 安裝的 `bin` 在 `PATH`。不要混用 MinGW 與 MSVC 版本。
   - Analyzer 預設連結進程內 TSDuck，不會啟動 `tsp`。只建置不含原生 TSDuck 的 Analyzer 可用 `cargo build --locked -p tsan-analyzer --no-default-features`；此模式沒有 TSDuck 的標準／section 統計及 SPS／VUI 幀率。
-  - 目前發行包尚未自帶 TSDuck／GStreamer DLL。從原始碼執行需上述 SDK 與 runtime；未來打包時須一併附上 DLL 與 TSDuck BSD-2-Clause 授權。Linux／macOS 的 bridge 原始碼使用同一 C ABI，但尚未在本專案驗證建置／播放。
+  - 上述是開發者的建置需求；一般使用者從完整 Windows package 啟動不需要 Rust、MSVC compiler、Windows SDK、pkg-config 或 development headers。打包腳本與私有 runtime、安裝及更新方式見 [distribution.md](distribution.md)。Linux／macOS 的完整建置／播放／安裝 backend 尚未驗證。
 
 ## 驗證
 
@@ -50,3 +50,7 @@ cargo run --locked -p tsan-player --example gstreamer_smoke
 ```
 
   - smoke example 會檢查 GStreamer 版本、必要元素及 D3D12／D3D11 adapter；通過不代表所有 TS 檔案或 seek 行為都已驗證。
+
+## 分析、播放器、匯出與系統狀態
+
+  - 詳見 [analysis-player-reports.md](analysis-player-reports.md)，包含 GOP、seek、報告分層及 recent／theme／log 保存方式。

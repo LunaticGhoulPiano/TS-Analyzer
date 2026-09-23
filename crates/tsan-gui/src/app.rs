@@ -2,11 +2,15 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU32, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use tsan_analyzer::{AnalysisReport, BroadcastStandard, analyze_file};
+use tsan_analyzer::{AnalysisReport, BroadcastStandard, analyze_file_with_progress};
 use tsan_input::InputSourceKind;
 use tsan_player::platform::windows::{
     GpuAdapterSelection, GstreamerAdapter, PlayerBackendKind, WindowsVideoHost,
@@ -23,7 +27,7 @@ use crate::platform::windows::{
 };
 use crate::player_worker::{PlayerCommand, PlayerSnapshot, PlayerWorkerHandle};
 use crate::report_export::{self, ExportInput, ReportFormat};
-use crate::ui_components::{ArrowScrollArea, ResizeHandle};
+use crate::ui_components::{ArrowScrollArea, ResizeHandle, help_text};
 use crate::update;
 
 const VIDEO_VIEWPORT_ID: &str = "tsan-video-output";
@@ -33,12 +37,10 @@ const PLAYER_ICON_SIZE: f32 = 34.0;
 const SYSTEM_TEXT_SIZE: f32 = 16.0;
 const HEADER_MENU_TEXT_SIZE: f32 = 14.0;
 const NAVIGATION_DEFAULT_WIDTH: f32 = 210.0;
-const MAX_CONCURRENT_ANALYSES: usize = 2;
+const MAX_CONCURRENT_ANALYSES: usize = 4;
 const BASELINE_COMPARISON_WINDOW_WIDTH: f32 = 1920.0;
 const BASELINE_COMPARISON_COUNT: usize = 3;
 const TRANSIENT_ERROR_DURATION: Duration = Duration::from_secs(3);
-// 0 is fully transparent and 255 is fully opaque. This controls tint, not blur radius.
-const DEFAULT_TRANSPARENT_BACKGROUND_OPACITY: u8 = 195;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
@@ -110,6 +112,10 @@ struct AnalyzerDocument {
     report: Option<AnalysisReport>,
     error: Option<String>,
     expanded: bool,
+    progress: Arc<AtomicU32>,
+    cancelled: Arc<AtomicBool>,
+    file_size: u64,
+    analysis_started: Option<Instant>,
     view_state: ViewState,
 }
 
@@ -179,9 +185,17 @@ pub struct TsanApp {
     navigation_width: f32,
     comparison_limit: usize,
     recent_files: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    settings_saved: Option<crate::config::Settings>,
+    settings_write_enabled: bool,
+    next_settings_save: Instant,
+    player_requested_input: Option<PathBuf>,
     export_selected: Vec<bool>,
     export_receiver: Option<Receiver<Result<PathBuf, String>>>,
     update_status: Option<update::UpdateStatus>,
+    update_receiver: Option<Receiver<update::UpdateStatus>>,
+    update_download: Option<Receiver<Result<PathBuf, String>>>,
+    staged_update: Option<PathBuf>,
     theme: AppTheme,
     glass_settings: liquid_glass::Settings,
     desktop_capture: Option<DesktopCapture>,
@@ -275,10 +289,24 @@ impl TsanApp {
     }
 
     pub fn new(context: &eframe::CreationContext<'_>, initial_input: Option<PathBuf>) -> Self {
-        let transparent_background_opacity = DEFAULT_TRANSPARENT_BACKGROUND_OPACITY;
+        let settings_path = crate::config::settings_path();
+        let loaded = settings_path
+            .as_deref()
+            .map(crate::config::load)
+            .unwrap_or_else(|| Ok(crate::config::Settings::default()));
+        let settings_error = loaded.as_ref().err().cloned();
+        let settings = loaded.unwrap_or_default();
+        let initial_theme = match settings.theme.as_str() {
+            "System" => AppTheme::System,
+            "Dark" => AppTheme::Dark,
+            "Transparent" => AppTheme::Transparent,
+            "Liquid Glass" => AppTheme::LiquidGlass,
+            _ => AppTheme::Light,
+        };
+        let transparent_background_opacity = settings.opacity;
         apply_theme(
             &context.egui_ctx,
-            AppTheme::Light,
+            initial_theme,
             transparent_background_opacity,
         );
 
@@ -301,11 +329,19 @@ impl TsanApp {
             pane_resize_drag: None,
             navigation_width: NAVIGATION_DEFAULT_WIDTH,
             comparison_limit: BASELINE_COMPARISON_COUNT,
-            recent_files: load_recent_files(),
+            recent_files: settings.recent_files,
+            settings_path,
+            settings_saved: None,
+            settings_write_enabled: settings_error.is_none(),
+            next_settings_save: Instant::now(),
+            player_requested_input: None,
             export_selected: Vec::new(),
             export_receiver: None,
             update_status: None,
-            theme: AppTheme::Light,
+            update_receiver: None,
+            update_download: None,
+            staged_update: None,
+            theme: initial_theme,
             glass_settings: liquid_glass::Settings::default(),
             desktop_capture: None,
             glass_freeze_request: None,
@@ -317,7 +353,11 @@ impl TsanApp {
             record_output_path: None,
             video_mode: VideoMode::Embedded,
             fullscreen_return_mode: VideoMode::Embedded,
-            selected_backend: PlayerBackendKind::D3d12,
+            selected_backend: if settings.player_backend == "d3d11" {
+                PlayerBackendKind::D3d11
+            } else {
+                PlayerBackendKind::D3d12
+            },
             selected_adapter: GpuAdapterSelection::Default,
             snapshot: PlayerSnapshot::default(),
             analyzer_pid_filter: String::new(),
@@ -344,10 +384,64 @@ impl TsanApp {
         if let Some(error) = app.local_error.clone() {
             app.record_log(LogLevel::Error, LogCategory::System, error);
         }
+        if let Some(error) = settings_error {
+            app.set_local_error(
+                LogCategory::Configuration,
+                format!("{error}; config was not overwritten."),
+            );
+        }
+        app.persist_settings();
         if let Some(input) = initial_input {
             app.load_input(input);
         }
         app
+    }
+
+    fn persist_settings(&mut self) {
+        if !self.settings_write_enabled {
+            return;
+        }
+        let Some(path) = self.settings_path.clone() else {
+            return;
+        };
+        let settings = crate::config::Settings {
+            theme: self.theme.name().into(),
+            opacity: self.transparent_background_opacity,
+            player_backend: match self.selected_backend {
+                PlayerBackendKind::D3d11 => "d3d11",
+                PlayerBackendKind::D3d12 => "d3d12",
+            }
+            .into(),
+            recent_files: self.recent_files.clone(),
+        };
+        if self.settings_saved.as_ref() == Some(&settings) {
+            return;
+        }
+        match crate::config::save(&path, &settings) {
+            Ok(()) => self.settings_saved = Some(settings),
+            Err(error) => {
+                self.settings_write_enabled = false;
+                self.set_local_error(LogCategory::Configuration, error);
+            }
+        }
+    }
+
+    fn sync_player_selection(&mut self) {
+        if self.page != Page::Player || self.player_view != PlayerView::PlayTs {
+            return;
+        }
+        let path = self.selected_document().map(|d| d.path.clone());
+        if path == self.player_requested_input {
+            return;
+        }
+        if let Some(path) = path {
+            self.load_player_input(path);
+        } else {
+            self.player_requested_input = None;
+            self.source_view = None;
+            self.send(PlayerCommand::ResetInput);
+            self.hide_embedded_video();
+        }
     }
 
     fn selected_document(&self) -> Option<&AnalyzerDocument> {
@@ -377,9 +471,12 @@ impl TsanApp {
             report: None,
             error: None,
             expanded: false,
+            progress: Arc::new(AtomicU32::new(0)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            file_size: fs::metadata(input).map_or(u64::MAX, |m| m.len()),
+            analysis_started: None,
             view_state: ViewState::new(),
         });
-        self.start_pending_analyses();
         self.selected_document = Some(self.documents.len() - 1);
         self.visible_documents.clear();
         self.visible_documents.push(self.documents.len() - 1);
@@ -387,13 +484,7 @@ impl TsanApp {
         self.recent_files.retain(|path| path != input);
         self.recent_files.insert(0, input.to_path_buf());
         self.recent_files.truncate(12);
-        if let Err(error) = save_recent_files(&self.recent_files) {
-            self.record_log(
-                LogLevel::Warning,
-                LogCategory::Configuration,
-                format!("Could not save recent files: {error}"),
-            );
-        }
+        self.persist_settings();
         self.analyzer_pid_filter.clear();
         self.analyzer_selected_pid = None;
     }
@@ -404,24 +495,44 @@ impl TsanApp {
             .iter()
             .filter(|document| document.receiver.is_some())
             .count();
-        let available = MAX_CONCURRENT_ANALYSES.saturating_sub(running);
-        let pending = self
+        let capacity = thread::available_parallelism()
+            .map_or(2, usize::from)
+            .saturating_sub(2)
+            .clamp(1, MAX_CONCURRENT_ANALYSES);
+        let available = capacity.saturating_sub(running);
+        let mut pending = self
             .documents
             .iter()
             .enumerate()
-            .filter(|(_, document)| {
-                document.receiver.is_none() && document.report.is_none() && document.error.is_none()
-            })
-            .take(available)
+            .filter(|(_, d)| d.receiver.is_none() && d.report.is_none() && d.error.is_none())
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
+        pending.sort_by_key(|&i| {
+            (
+                self.selected_document != Some(i),
+                !self.visible_documents.contains(&i),
+                self.documents[i].file_size,
+                i,
+            )
+        });
+        pending.truncate(available);
         for index in pending {
             let (sender, receiver) = mpsc::channel();
             let path = self.documents[index].path.clone();
+            let progress = self.documents[index].progress.clone();
+            let cancelled = self.documents[index].cancelled.clone();
+            self.documents[index].analysis_started = Some(Instant::now());
             match thread::Builder::new()
                 .name("tsan-analyzer-worker".to_owned())
                 .spawn(move || {
-                    let result = analyze_file(&path).map_err(|error| error.to_string());
+                    let result = analyze_file_with_progress(&path, |read, total| {
+                        progress.store(
+                            (read.saturating_mul(1000) / total.max(1)) as u32,
+                            Ordering::Relaxed,
+                        );
+                        !cancelled.load(Ordering::Relaxed)
+                    })
+                    .map_err(|error| error.to_string());
                     let _ = sender.send(result);
                 }) {
                 Ok(_worker) => self.documents[index].receiver = Some(receiver),
@@ -442,10 +553,13 @@ impl TsanApp {
                     logs.push((
                         LogLevel::Info,
                         format!(
-                            "Analyzed {}: {} TS packets across {} PIDs",
+                            "Analyzed {}: {} TS packets across {} PIDs in {:.2} s",
                             document.path.display(),
                             report.packets,
-                            report.pids.len()
+                            report.pids.len(),
+                            document
+                                .analysis_started
+                                .map_or(0.0, |t| t.elapsed().as_secs_f64())
                         ),
                     ));
                     document.report = Some(report);
@@ -472,6 +586,37 @@ impl TsanApp {
     fn receive_snapshots(&mut self) {
         self.receive_analysis();
         self.receive_export();
+        if let Some(receiver) = &self.update_receiver {
+            match receiver.try_recv() {
+                Ok(status) => {
+                    self.update_status = Some(status);
+                    self.update_receiver = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.update_status =
+                        Some(update::UpdateStatus::Failed("Update worker stopped".into()));
+                    self.update_receiver = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(receiver) = &self.update_download {
+            match receiver.try_recv() {
+                Ok(Ok(path)) => {
+                    self.staged_update = Some(path);
+                    self.update_download = None;
+                }
+                Ok(Err(error)) => {
+                    self.set_local_error(LogCategory::System, error);
+                    self.update_download = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.set_local_error(LogCategory::System, "Update download stopped");
+                    self.update_download = None;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         if let Some(snapshot) = self.worker.latest_snapshot() {
             let last_worker_log_sequence = self.last_worker_log_sequence;
             for entry in snapshot
@@ -481,6 +626,11 @@ impl TsanApp {
             {
                 self.last_worker_log_sequence = self.last_worker_log_sequence.max(entry.sequence);
                 self.log_entries.push(entry.clone());
+            }
+            if self.player_requested_input.is_some()
+                && snapshot.input != self.player_requested_input
+            {
+                return;
             }
             if self.source_view != Some(InputSourceKind::IpStreaming) {
                 self.source_view = snapshot.source_kind;
@@ -560,6 +710,9 @@ impl TsanApp {
     }
 
     fn load_player_input(&mut self, input: PathBuf) {
+        let resume = self.snapshot.state == PlayerState::Playing;
+        self.player_requested_input = Some(input.clone());
+        self.hide_embedded_video();
         self.clear_local_error();
         self.source_view = None;
         self.ip_streaming_protocol = None;
@@ -570,10 +723,14 @@ impl TsanApp {
             kind: self.selected_backend,
             adapter: self.selected_adapter,
         });
+        if resume {
+            self.send(PlayerCommand::Play);
+        }
         self.page = Page::Player;
     }
 
     fn select_ip_streaming(&mut self, protocol: IpStreamingProtocol) {
+        self.player_requested_input = None;
         self.send(PlayerCommand::ResetInput);
         self.clear_surface();
         self.set_video_mode(VideoMode::Embedded);
@@ -721,6 +878,7 @@ impl TsanApp {
             self.hide_embedded_video();
         }
         self.page = page;
+        self.sync_player_selection();
     }
 
     fn set_video_mode(&mut self, mode: VideoMode) {
@@ -819,6 +977,8 @@ impl TsanApp {
     ) -> Option<egui::Rect> {
         let mut open_requested = false;
         let mut recent_requested = None;
+        let mut clear_recent_requested = false;
+        let mut github_requested = false;
         let mut export_requested = None;
         let mut opacity_changed = false;
         let mut popup_rectangle = None;
@@ -853,13 +1013,10 @@ impl TsanApp {
                                 AppTheme::Light,
                                 egui::RichText::new("Light").size(SYSTEM_TEXT_SIZE),
                             );
-                            ui.selectable_value(
-                                &mut self.theme,
-                                AppTheme::LiquidGlass,
+                            let previous_glass_settings = self.glass_settings;
+                            let glass_menu = ui.menu_button(
                                 egui::RichText::new("Liquid Glass (experimental)").size(SYSTEM_TEXT_SIZE),
-                            ).on_hover_text("Live mode hides this window from screenshots. Freeze the background in Glass settings before taking a screenshot.");
-                            if self.theme == AppTheme::LiquidGlass {
-                                ui.menu_button("Glass settings", |ui| {
+                                |ui| {
                                     ui.set_max_width(340.0);
                                     let frozen = self.desktop_capture.as_ref().is_some_and(DesktopCapture::is_frozen);
                                     if frozen {
@@ -883,7 +1040,10 @@ impl TsanApp {
                                         &mut popup_rectangle,
                                         ui.min_rect().expand(6.0),
                                     );
-                                });
+                                },
+                            );
+                            if glass_menu.response.clicked() || self.glass_settings != previous_glass_settings {
+                                self.theme = AppTheme::LiquidGlass;
                             }
                             let transparent_menu = ui.menu_button(
                                 egui::RichText::new("Transparent").size(SYSTEM_TEXT_SIZE),
@@ -922,13 +1082,18 @@ impl TsanApp {
                         egui::RichText::new("Import Transport Stream ...")
                             .size(HEADER_MENU_TEXT_SIZE),
                         |ui| {
-                            if ui.button("Import File ...").clicked() {
+                            if ui.button("Import Files ...").clicked() {
                                 open_requested = true;
                                 ui.close();
                             }
                             ui.menu_button("Import Recent Files ...", |ui| {
+                                if ui.add_enabled(!self.recent_files.is_empty(), egui::Button::new("Clear Recent Files")).clicked() {
+                                    clear_recent_requested = true;
+                                    ui.close();
+                                }
+                                ui.separator();
                                 if self.recent_files.is_empty() {
-                                    ui.weak("No recent files");
+                                    help_text(ui, "No recent files");
                                 }
                                 for path in &self.recent_files {
                                     if ui.button(path.display().to_string()).clicked() {
@@ -954,7 +1119,7 @@ impl TsanApp {
                             ui.set_min_width(360.0);
                             ui.strong("Transport Streams — checked files are included");
                             if self.documents.is_empty() {
-                                ui.weak("Import a transport stream first.");
+                                help_text(ui, "Import a transport stream first.");
                             }
                             for index in self.visible_documents.iter().copied() {
                                 let document = &self.documents[index];
@@ -968,7 +1133,7 @@ impl TsanApp {
                             }
                             ui.separator();
                             for format in
-                                [ReportFormat::Cbor, ReportFormat::Latex, ReportFormat::Pdf]
+                                [ReportFormat::Cbor, ReportFormat::Xlsx, ReportFormat::Latex, ReportFormat::Pdf]
                             {
                                 if ui
                                     .add_enabled(
@@ -987,7 +1152,7 @@ impl TsanApp {
                             }
                             if self.export_receiver.is_some() {
                                 ui.spinner();
-                                ui.weak("Export in progress...");
+                                help_text(ui, "Export in progress...");
                             }
                             include_popup_rectangle(
                                 &mut popup_rectangle,
@@ -998,11 +1163,10 @@ impl TsanApp {
                     ui.menu_button(
                         egui::RichText::new("Help").size(HEADER_MENU_TEXT_SIZE),
                         |ui| {
-                            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                            ui.hyperlink_to(
-                                "GitHub Link",
-                                "https://github.com/LunaticGhoulPiano/TS-Analyzer",
-                            );
+                            ui.label(format!("{} {}", std::env::consts::OS, crate::release::VERSION));
+                            ui.label(crate::release::MINIMUM_OS);
+                            help_text(ui, format!("Release status: {}", crate::release::STATUS));
+                            if ui.link("GitHub Link").clicked() { github_requested = true; ui.close(); }
                             include_popup_rectangle(
                                 &mut popup_rectangle,
                                 ui.min_rect().expand(6.0),
@@ -1016,21 +1180,35 @@ impl TsanApp {
                             ui.strong(format!(
                                 "{} {}",
                                 backend.platform,
-                                env!("CARGO_PKG_VERSION")
+                                crate::release::VERSION
                             ));
                             ui.label(format!(
                                 "Target: {}/{}",
                                 backend.target_os, backend.target_arch
                             ));
-                            ui.weak(backend.artifact_policy);
-                            if ui.button("Check for updates").clicked() {
-                                self.update_status = Some(update::check_for_updates());
+                            help_text(ui, backend.artifact_policy);
+                            ui.set_max_width(480.0);
+                            if ui.add_enabled(self.update_receiver.is_none(), egui::Button::new("Check for updates")).clicked() {
+                                self.update_receiver = Some(update::start_check());
+                            }
+                            if self.update_receiver.is_some() { ui.spinner(); ui.label("Checking GitHub Releases..."); }
+                            if let Some(update::UpdateStatus::Available(release)) = &self.update_status {
+                                if self.staged_update.is_none() && ui.add_enabled(self.update_download.is_none(), egui::Button::new("Download verified update")).clicked() {
+                                    self.update_download = Some(update::start_download(release.clone()));
+                                }
+                            }
+                            if self.update_download.is_some() { ui.spinner(); ui.label("Downloading and verifying complete package..."); }
+                            if let Some(package) = &self.staged_update && ui.button("Install update and restart").clicked() {
+                                match update::install_staged_update(package) {
+                                    Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                                    Err(error) => self.set_local_error(LogCategory::System, error),
+                                }
                             }
                             if let Some(status) = &self.update_status {
                                 ui.separator();
                                 ui.add(egui::Label::new(status.message()).wrap());
                             } else {
-                                ui.weak("No update check has been run.");
+                                help_text(ui, "No update check has been run.");
                             }
                             include_popup_rectangle(
                                 &mut popup_rectangle,
@@ -1041,6 +1219,15 @@ impl TsanApp {
                 });
             });
 
+        if clear_recent_requested {
+            self.recent_files.clear();
+            self.persist_settings();
+        }
+        if github_requested
+            && let Err(error) = crate::os_integration::open_url(crate::os_integration::PROJECT_URL)
+        {
+            self.set_local_error(LogCategory::System, error);
+        }
         if open_requested {
             self.open_transport_stream(frame);
         }
@@ -1105,7 +1292,10 @@ impl TsanApp {
                 .unwrap_or_else(|| "No output file selected".to_owned()),
         );
         ui.separator();
-        ui.weak("Recording becomes available when the selected live input is connected.");
+        help_text(
+            ui,
+            "Recording becomes available when the selected live input is connected.",
+        );
         output_requested
     }
 
@@ -1293,7 +1483,7 @@ impl TsanApp {
                 ui.indent(("queue-document", index), |ui| {
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(document.path.display().to_string()).small(),
+                            egui::RichText::new(document.path.display().to_string()).size(16.0),
                         )
                         .wrap(),
                     );
@@ -1324,19 +1514,26 @@ impl TsanApp {
                 }
             }
             NavigationAction::SelectDocument(index) => {
+                if self.page == Page::Player {
+                    self.player_view = PlayerView::PlayTs;
+                }
                 self.selected_document = Some(index);
-                if !self.visible_documents.contains(&index) {
+                if self.page != Page::Player && !self.visible_documents.contains(&index) {
                     self.visible_documents.clear();
                     self.visible_documents.push(index);
                     self.pane_widths = equal_pane_weights(1);
                 }
                 self.analyzer_selected_pid = None;
-                self.select_page(Page::Analyzer);
+                if self.page != Page::Player {
+                    self.select_page(Page::Analyzer);
+                }
             }
             NavigationAction::ExpandDocument(index) => {
                 self.documents[index].expanded = !self.documents[index].expanded;
                 self.selected_document = Some(index);
-                self.select_page(Page::Analyzer);
+                if self.page != Page::Player {
+                    self.select_page(Page::Analyzer);
+                }
             }
             NavigationAction::ToggleVisibleDocument(index) => {
                 if let Some(position) = self
@@ -1346,7 +1543,9 @@ impl TsanApp {
                 {
                     if self.visible_documents.len() > 1 {
                         self.visible_documents.remove(position);
-                        self.selected_document = self.visible_documents.first().copied();
+                        if self.selected_document == Some(index) {
+                            self.selected_document = self.visible_documents.last().copied();
+                        }
                         self.pane_widths = equal_pane_weights(self.visible_documents.len());
                     }
                 } else if self.visible_documents.len() < self.comparison_limit {
@@ -1363,15 +1562,19 @@ impl TsanApp {
                         ),
                     );
                 }
-                self.select_page(Page::Analyzer);
+                if self.page != Page::Player {
+                    self.select_page(Page::Analyzer);
+                }
             }
             NavigationAction::CloseDocument(index) => self.close_document(index),
             NavigationAction::ReorderDocument(from, to) => self.reorder_document(from, to),
             NavigationAction::PlayDocument(index) => {
+                self.selected_document = Some(index);
                 let path = self.documents[index].path.clone();
                 self.load_player_input(path);
             }
         }
+        self.sync_player_selection();
     }
 
     fn reorder_document(&mut self, from: usize, to: usize) {
@@ -1401,6 +1604,9 @@ impl TsanApp {
         if index >= self.documents.len() {
             return;
         }
+        self.documents[index]
+            .cancelled
+            .store(true, Ordering::Relaxed);
         let path = self.documents.remove(index).path;
         self.export_selected.remove(index);
         self.visible_documents.retain(|&item| item != index);
@@ -1657,7 +1863,17 @@ impl TsanApp {
                 .is_some_and(|document| document.receiver.is_some())
             {
                 ui.spinner();
-                ui.label("Analyzing transport stream...");
+                let fraction = self
+                    .selected_document()
+                    .map_or(0.0, |d| d.progress.load(Ordering::Relaxed) as f32 / 1000.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .show_percentage()
+                        .text(format!(
+                            "Analyzing transport stream: {:.0}%",
+                            fraction * 100.0
+                        )),
+                );
             } else if self.selected_document().is_some() {
                 ui.label("Queued for analysis...");
             } else {
@@ -1984,7 +2200,10 @@ PCR PID: {}
                     );
                 }
             });
-        ui.label("The selected backend and adapter apply to the next file loaded in Player.");
+        help_text(
+            ui,
+            "The selected backend and adapter apply to the next file loaded in Player.",
+        );
         if previous_backend != self.selected_backend || previous_adapter != self.selected_adapter {
             self.record_log(
                 LogLevel::Info,
@@ -2110,9 +2329,21 @@ PCR PID: {}
                         egui::Frame::group(pane_ui.style())
                             .inner_margin(egui::Margin::same(8))
                             .show(&mut pane_ui, |ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
                                 ui.set_width((widths[pane] - 18.0).max(120.0));
                                 ui.set_min_height((height - 18.0).max(240.0));
                                 self.selected_document = Some(index);
+                                if let Some(document) = self.documents.get(index) {
+                                    ui.strong(
+                                        document
+                                            .path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy(),
+                                    )
+                                    .on_hover_text(document.path.display().to_string());
+                                    ui.separator();
+                                }
                                 ui.push_id(("analyzer-pane", index), |ui| self.analyzer_page(ui));
                             });
 
@@ -2205,16 +2436,13 @@ PCR PID: {}
                 egui::Frame::group(ui.style())
                     .inner_margin(24.0)
                     .show(ui, |ui| {
-                        ui.label("No playable MPEG transport stream is loaded.");
+                        ui.label(if self.player_requested_input.is_some() {
+                            "Preparing selected transport stream..."
+                        } else {
+                            "No MPEG transport stream is selected."
+                        });
                         ui.label("Import a TS file, then select it from the queue.");
                     });
-                if let Some(path) = self
-                    .selected_document()
-                    .map(|document| document.path.clone())
-                    && ui.button("Play selected TS").clicked()
-                {
-                    self.load_player_input(path);
-                }
             }
         }
 
@@ -2246,7 +2474,8 @@ PCR PID: {}
             .inner_margin(24.0)
             .show(ui, |ui| {
                 ui.label("UDP/RTP live input is not connected yet.");
-                ui.weak(
+                help_text(
+                    ui,
                     "Protocol selection is available; receiver and recording backend are pending.",
                 );
             });
@@ -2732,46 +2961,6 @@ fn readonly_log_text(ui: &mut egui::Ui, id_salt: &'static str, text: &str) -> eg
     )
 }
 
-fn recent_files_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|directory| {
-        PathBuf::from(directory)
-            .join("TS-Analyzer")
-            .join("recent-files.txt")
-    })
-}
-
-fn load_recent_files() -> Vec<PathBuf> {
-    let Some(path) = recent_files_path() else {
-        return Vec::new();
-    };
-    fs::read_to_string(path).map_or_else(
-        |_| Vec::new(),
-        |contents| {
-            contents
-                .lines()
-                .filter(|line| !line.is_empty())
-                .take(12)
-                .map(PathBuf::from)
-                .collect()
-        },
-    )
-}
-
-fn save_recent_files(paths: &[PathBuf]) -> std::io::Result<()> {
-    let Some(path) = recent_files_path() else {
-        return Ok(());
-    };
-    if let Some(directory) = path.parent() {
-        fs::create_dir_all(directory)?;
-    }
-    let contents = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(path, contents)
-}
-
 fn middle_drag_scroll(ui: &egui::Ui, id_salt: &'static str) {
     let state_id = ui.id().with(id_salt);
     let clip_rectangle = ui.clip_rect();
@@ -2801,6 +2990,10 @@ fn middle_drag_scroll(ui: &egui::Ui, id_salt: &'static str) {
 
 impl eframe::App for TsanApp {
     fn on_exit(&mut self) {
+        self.persist_settings();
+        for document in &self.documents {
+            document.cancelled.store(true, Ordering::Relaxed);
+        }
         if let Some(mut capture) = self.desktop_capture.take()
             && let Err(error) = capture.stop()
         {
@@ -2823,6 +3016,10 @@ impl eframe::App for TsanApp {
 
     fn ui(&mut self, root_ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.receive_snapshots();
+        if Instant::now() >= self.next_settings_save {
+            self.persist_settings();
+            self.next_settings_save = Instant::now() + Duration::from_secs(1);
+        }
         self.expire_local_error();
         let context = root_ui.ctx().clone();
         context.request_repaint_after(Duration::from_millis(
@@ -2849,10 +3046,10 @@ impl eframe::App for TsanApp {
         egui::CentralPanel::default().show(root_ui, |ui| {
             if self.theme == AppTheme::LiquidGlass
                 && self.desktop_capture.as_ref().is_some_and(DesktopCapture::is_frozen) {
-                ui.weak("Glass background frozen — screenshots enabled. Resume live mode in Theme > Glass settings.");
+                help_text(ui, "Glass background frozen — screenshots enabled. Resume live mode in Theme > Glass settings.");
             }
             if self.theme == AppTheme::LiquidGlass && background.is_none() {
-                ui.weak("Waiting for desktop capture. Keep the window fully on one display.");
+                help_text(ui, "Waiting for desktop capture. Keep the window fully on one display.");
             }
             if self.page == Page::Analyzer {
                 self.document_tabs(ui);

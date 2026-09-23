@@ -12,11 +12,16 @@ const MAX_REORDER: u64 = PTS_CLOCK_HZ;
 pub struct TransportStreamSeekPoint {
     position: Duration,
     byte_offset: u64,
+    decode_position: Duration,
 }
 
 impl TransportStreamSeekPoint {
     pub const fn position(self) -> Duration {
         self.position
+    }
+
+    pub const fn decode_position(self) -> Duration {
+        self.decode_position
     }
 
     pub const fn byte_offset(self) -> u64 {
@@ -163,6 +168,24 @@ pub fn index_transport_stream(
         let point = TransportStreamSeekPoint {
             position: ticks_to_duration(position_ticks),
             byte_offset: current_offset,
+            decode_position: {
+                let dts = if payload[7] & 0xc0 == 0xc0 && payload[8] >= 10 {
+                    payload.get(14..19).map(|p| {
+                        (u64::from((p[0] >> 1) & 7) << 30)
+                            | (u64::from(p[1]) << 22)
+                            | (u64::from(p[2] >> 1) << 15)
+                            | (u64::from(p[3]) << 7)
+                            | u64::from(p[4] >> 1)
+                    })
+                } else {
+                    None
+                };
+                let delay = dts
+                    .map(|d| (pts + PTS_WRAP - d) % PTS_WRAP)
+                    .filter(|d| *d < PTS_CLOCK_HZ * 10)
+                    .unwrap_or(0);
+                ticks_to_duration(position_ticks.saturating_sub(delay))
+            },
         };
         pes_points.push(point);
         if random_access {
@@ -247,6 +270,7 @@ mod tests {
             Some(TransportStreamSeekPoint {
                 position: Duration::ZERO,
                 byte_offset: 0,
+                decode_position: Duration::ZERO,
             })
         );
     }

@@ -71,4 +71,4 @@ flowchart LR
   - `tsan-player` 接收 UDP／RTP、管理播放與原始 TS 錄製；錄製不得改寫 payload、PID、CC 或封包順序。
   - `tsan-runtime` 日後以有界佇列分發資料，明確記錄丟包與背壓；分析不應因 UI／播放器停頓而失去資料。
   - 快速跳轉只保留最新目標並忽略過期結果；本機 TS 的 byte-level 索引與 `appsrc` 供應屬後續優化，不能視為目前已解決的 seek。
-  - TSDuck 是進程內原生相依套件，C++ exception 由 bridge 轉成錯誤碼；EasyICE、DVB Inspector、VLC 與 `GeminiAdvice.md` 僅作設計／驗證參考。TSDuck 採 BSD-2-Clause，發行時須附授權與對應平台的 DLL／so／dylib；目前尚未完成自帶 runtime 的發行包。
+  - TSDuck 是進程內原生相依套件，C++ exception 由 bridge 轉成錯誤碼；TSDuck 採 BSD-2-Clause，發行時須附授權與對應平台的 DLL／so／dylib；目前尚未完成自帶 runtime 的發行包。

@@ -53,6 +53,7 @@ pub struct AnalysisReport {
     pub pids: BTreeMap<u16, PidReport>,
     pub programs: BTreeMap<u16, ProgramReport>,
     pub video_metadata: BTreeMap<u16, VideoMetadata>,
+    pub video_gops: BTreeMap<u16, crate::VideoGops>,
     pub native: Option<NativeSummary>,
     pub clock_points: Vec<ClockPoint>,
     pub random_access_points: Vec<(u64, u16)>,
@@ -351,7 +352,16 @@ impl PmtAssembly {
 }
 
 pub fn analyze_file(path: &Path) -> io::Result<AnalysisReport> {
+    analyze_file_with_progress(path, |_, _| true)
+}
+
+/// Analyze with bounded buffers; returning false cancels between input batches.
+pub fn analyze_file_with_progress(
+    path: &Path,
+    mut progress: impl FnMut(u64, u64) -> bool,
+) -> io::Result<AnalysisReport> {
     let mut file = File::open(path)?;
+    let total = file.metadata()?.len();
     let mut sample = vec![0; 64 * 1024];
     let sample_size = file.read(&mut sample)?;
     let probe = probe_transport_stream(&sample[..sample_size])
@@ -365,31 +375,48 @@ pub fn analyze_file(path: &Path) -> io::Result<AnalysisReport> {
         .map_err(|error| io::Error::other(format!("TSDuck initialization failed: {error:?}")))?;
     let packet_size = probe.packet_size();
     let sync_offset = usize::from(probe.format() == TransportStreamFormat::M2ts192) * 4;
-    let mut bytes = [0; 204];
+    let mut bytes = vec![0; packet_size * 4096];
+    #[cfg(feature = "native-tsduck")]
+    let mut native_bytes = Vec::with_capacity(188 * 4096);
+    let mut consumed = probe.stream_start_offset() as u64;
     loop {
+        if !progress(consumed, total) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Analysis cancelled",
+            ));
+        }
         let mut filled = 0;
-        while filled < packet_size {
-            let count = reader.read(&mut bytes[filled..packet_size])?;
-            if count == 0 {
-                break;
+        while filled < bytes.len() {
+            match reader.read(&mut bytes[filled..]) {
+                Ok(0) => break,
+                Ok(count) => filled += count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
-            filled += count;
         }
         if filled == 0 {
             break;
         }
-        if filled < packet_size {
-            analyzer.report.trailing_bytes = filled as u64;
-            break;
-        }
-        let packet = &bytes[sync_offset..sync_offset + 188];
-        analyzer.packet(packet);
         #[cfg(feature = "native-tsduck")]
-        if packet[0] == 0x47 {
-            native.feed_aligned(packet).map_err(|error| {
-                io::Error::other(format!("TSDuck packet analysis failed: {error:?}"))
+        native_bytes.clear();
+        let mut packets = bytes[..filled].chunks_exact(packet_size);
+        for bytes in &mut packets {
+            let packet = &bytes[sync_offset..sync_offset + 188];
+            analyzer.packet(packet);
+            #[cfg(feature = "native-tsduck")]
+            if packet[0] == 0x47 {
+                native_bytes.extend_from_slice(packet);
+            }
+        }
+        analyzer.report.trailing_bytes = packets.remainder().len() as u64;
+        #[cfg(feature = "native-tsduck")]
+        if !native_bytes.is_empty() {
+            native.feed_aligned(&native_bytes).map_err(|error| {
+                io::Error::other(format!("TSDuck batch analysis failed: {error:?}"))
             })?;
         }
+        consumed += filled as u64;
     }
     let report = analyzer.finish();
     #[cfg(feature = "native-tsduck")]
@@ -427,6 +454,10 @@ struct Analyzer {
     states: BTreeMap<u16, PidState>,
     sections: BTreeMap<u16, SectionAssembler>,
     video_probes: BTreeMap<u16, VideoProbe>,
+    frame_probes: BTreeMap<u16, tsan_core::VideoFrameProbe>,
+    // Two bytes per packet, discarded after exact GOP program-byte accounting.
+    // Avoids re-reading each input or rounding GOP boundaries to bitrate windows.
+    packet_pids: Vec<u16>,
     active_pat: Option<TableKey>,
     pending_pat: PatAssembly,
     active_pmts: BTreeMap<u16, TableKey>,
@@ -462,6 +493,30 @@ fn signalled_atsc_modulation(section: &[u8]) -> SignalledModulation {
 
 impl Analyzer {
     fn finish(mut self) -> AnalysisReport {
+        for (pid, probe) in self.frame_probes {
+            let codec = probe.codec();
+            let mut video = crate::VideoGops::from_frames(codec, probe.finish());
+            let mut programs = self
+                .report
+                .programs
+                .iter()
+                .filter(|(_, p)| p.streams.contains_key(&pid));
+            if let Some((&number, program)) = programs.next()
+                && programs.next().is_none()
+            {
+                let mut pids = BTreeSet::from([0, program.pmt_pid]);
+                pids.extend(program.pcr_pid);
+                pids.extend(program.streams.keys().copied());
+                pids.remove(&0x1fff);
+                video.measure_program_bytes(
+                    number,
+                    pids.into_iter().collect(),
+                    &self.packet_pids,
+                    self.report.format.packet_size(),
+                );
+            }
+            self.report.video_gops.insert(pid, video);
+        }
         for (pid, probe) in self.video_probes {
             let active = self.report.programs.values().any(|program| {
                 program
@@ -507,6 +562,7 @@ impl Analyzer {
                 pids: BTreeMap::new(),
                 programs: BTreeMap::new(),
                 video_metadata: BTreeMap::new(),
+                video_gops: BTreeMap::new(),
                 native: None,
                 clock_points: Vec::new(),
                 random_access_points: Vec::new(),
@@ -520,6 +576,8 @@ impl Analyzer {
             states: BTreeMap::new(),
             sections,
             video_probes: BTreeMap::new(),
+            frame_probes: BTreeMap::new(),
+            packet_pids: Vec::new(),
             active_pat: None,
             pending_pat: PatAssembly::default(),
             active_pmts: BTreeMap::new(),
@@ -531,6 +589,12 @@ impl Analyzer {
     fn packet(&mut self, ts: &[u8]) {
         self.report.packets += 1;
         let index = self.report.packets - 1;
+        self.packet_pids
+            .push(if ts[0] == 0x47 && ts[3] & 0x30 != 0 {
+                (u16::from(ts[1] & 0x1f) << 8) | u16::from(ts[2])
+            } else {
+                u16::MAX
+            });
         if index.is_multiple_of(BITRATE_WINDOW_PACKETS) {
             self.report.bitrate_windows.push(BitrateWindow {
                 first_packet: index,
@@ -593,6 +657,9 @@ impl Analyzer {
                     }
                 }
                 if ts[5] & 0x80 != 0 {
+                    if let Some(probe) = self.frame_probes.get_mut(&pid) {
+                        probe.discontinuity();
+                    }
                     state.previous_counter = None;
                     state.previous_pcr = None;
                     state.previous_pcr_packet = None;
@@ -705,12 +772,18 @@ impl Analyzer {
             }
             if counter != (previous + 1) & 0x0f {
                 entry.continuity_errors += 1;
+                if let Some(probe) = self.frame_probes.get_mut(&pid) {
+                    probe.discontinuity();
+                }
             }
         }
         state.previous_counter = Some(counter);
         state.previous_packet.clear();
         state.previous_packet.extend_from_slice(ts);
-        if ts[1] & 0x80 != 0 {
+        if ts[1] & 0x80 != 0 || ts[3] & 0xc0 != 0 {
+            if let Some(probe) = self.frame_probes.get_mut(&pid) {
+                probe.discontinuity();
+            }
             return;
         }
         if ts[3] & 0xc0 == 0 {
@@ -735,6 +808,16 @@ impl Analyzer {
                 .filter(|stream| stream.is_video())
                 .map(|stream| stream.stream_type);
             if let Some(stream_type) = video_type {
+                if matches!(stream_type, 0x1b | 0x24) {
+                    let frames = self
+                        .frame_probes
+                        .entry(pid)
+                        .or_insert_with(|| tsan_core::VideoFrameProbe::new(stream_type));
+                    if frames.codec() != stream_type {
+                        *frames = tsan_core::VideoFrameProbe::new(stream_type);
+                    }
+                    frames.push(&ts[payload_offset..], ts[1] & 0x40 != 0, index);
+                }
                 let probe = self
                     .video_probes
                     .entry(pid)
