@@ -25,4 +25,4 @@ Desktop.ini
 
 # Machine-specific development settings and generated artifacts
 /developmentHelpers/config/*.local.psd1
-/developmentHelpers/outputs/
+/outputs/

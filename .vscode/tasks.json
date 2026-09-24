@@ -291,7 +291,7 @@
     {
       "id": "texRecorder",
       "type": "promptString",
-      "description": "XeLaTeX report .fls produced with the detected TeX installation (absolute or repository-relative path)"
+      "description": "XeLaTeX recorder from the configured TeX installation, e.g. outputs/windows/pdf-runtime/report_sections/build/report.fls (absolute or repository-relative)"
     },
     {
       "id": "packageDirectory",

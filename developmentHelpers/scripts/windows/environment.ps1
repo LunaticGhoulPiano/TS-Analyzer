@@ -19,8 +19,8 @@ function Get-DevelopmentConfiguration([string]$Repository, [string]$Configuratio
     GStreamerRoot = ''; TSDuckRoot = ''; TexRoot = ''; MsvcRuntime = ''; MsvcLicenses = ''
     InnoCompiler = ''; TexRecorder = ''; Package = ''
     Recordings = 'developmentHelpers/test-data/inputs/local'
-    OutputDirectory = 'developmentHelpers/outputs/windows'
-    DeployDirectory = 'developmentHelpers/outputs/deploy/windows'
+    OutputDirectory = 'outputs/windows'
+    DeployDirectory = 'outputs/deploy/windows'
   }
   if (-not $Configuration) { $Configuration = Join-Path $Repository 'developmentHelpers/config/windows.local.psd1' }
   else {

@@ -53,7 +53,7 @@ fn await_file(path: &Path) -> io::Result<()> {
 fn logs_and_panic_survive_process_exit() -> Result<(), Box<dyn std::error::Error>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../developmentHelpers/outputs")
+        .join("../../outputs")
         .join(std::env::consts::OS)
         .join("diagnostics-tests")
         .join(format!("run-{}-{nonce}", std::process::id()));

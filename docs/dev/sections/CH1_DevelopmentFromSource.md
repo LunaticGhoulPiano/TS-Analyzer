@@ -60,10 +60,12 @@ if (-not (Test-Path -LiteralPath developmentHelpers/config/windows.local.psd1)) 
 | InnoCompiler | ISCC_EXE | ISCC.exe file. |
 | TexRecorder | TSAN_DEV_TEX_RECORDER | Complete representative report's .fls from the selected TeX installation. |
 | Recordings | TSAN_TEST_RECORDINGS | Local TS directory; defaults to developmentHelpers/test-data/inputs/local. |
-| OutputDirectory | TSAN_DEV_OUTPUT | Intermediate files, logs and developer state; defaults to developmentHelpers/outputs/windows. |
-| DeployDirectory | TSAN_DEV_DEPLOY | User ZIP, installer and checksums; defaults to developmentHelpers/outputs/deploy/windows. |
+| OutputDirectory | TSAN_DEV_OUTPUT | Intermediate files, logs and developer state; defaults to outputs/windows. |
+| DeployDirectory | TSAN_DEV_DEPLOY | User ZIP, installer and checksums; defaults to outputs/deploy/windows. |
 | Package | — | Existing unpacked package used by Installer and package verification. |
 
+  - Generated work and delivery files live under the repository root outputs/ and are ignored by Git. developmentHelpers/ contains maintained tooling, configuration, and test resources. Cargo output remains in target/.
+  - If an existing local configuration or TSAN_DEV_OUTPUT, TSAN_DEV_DEPLOY, or TSAN_DEV_TEX_RECORDER override still points to the former output location, update that override to the new root. Explicit overrides continue to take precedence.
   - Empty tool settings enable automatic discovery. Relative paths resolve from the repository root; absolute paths can be supplied locally.
   - Precedence is a command-line argument where offered, then its environment override, local configuration, and finally discovery/defaults.
   - Use -Configuration to select another .psd1 file. An explicitly selected missing file is an error.
@@ -86,8 +88,8 @@ if (-not (Test-Path -LiteralPath developmentHelpers/config/windows.local.psd1)) 
 | [developmentHelpers/packaging/platforms.toml](../../../developmentHelpers/packaging/platforms.toml) | Independent platform versions, status, and minimum OS. |
 | [developmentHelpers/packaging/windows/ts-analyzer.iss](../../../developmentHelpers/packaging/windows/ts-analyzer.iss) | Inno identity, install scope, file rules, and shortcuts. |
 | [developmentHelpers/test-data/inputs/manifest.toml](../../../developmentHelpers/test-data/inputs/manifest.toml) and expected/ | Test input identity and expected-data records. |
-| developmentHelpers/outputs/windows/state/tsan-config.toml | GUI settings when launched through the Run task. |
-| developmentHelpers/outputs/windows/diagnostics/ | Automatic diagnostic sessions when launched through Run. TSAN_DIAGNOSTICS_DIR overrides the application directory; Run sets it to OutputDirectory/diagnostics for its child process. |
+| outputs/windows/state/tsan-config.toml | GUI settings when launched through the Run task. |
+| outputs/windows/diagnostics/ | Automatic diagnostic sessions when launched through Run. TSAN_DIAGNOSTICS_DIR overrides the application directory; Run sets it to OutputDirectory/diagnostics for its child process. |
 | Application tsan-config.toml | User preferences; locations are listed below. |
 | Package deployment.toml / package.toml / build-info.toml / SHA256SUMS | Generated deployment mode, runtime/build identity, and file integrity inventory. |
 
@@ -150,7 +152,7 @@ cargo deny --config developmentHelpers/config/deny.toml check
 | Windows: Build debug / Build release | Build -Profile Debug / Release | Cargo target/debug or target/release. |
 | Windows: Run debug / Run release | Run -Profile Debug / Release | Cargo binary, OutputDirectory/state/tsan-config.toml, and OutputDirectory/diagnostics/session-*/. |
 | Windows: Test workspace | Test | Cargo test results; individual tests may use OS temporary directories. |
-| Windows: CI checks | CI | Terminal results, license-tests/<run-id>, update-tests/<run-id>, portable-update-tests/<run-id>, and developmentHelpers/outputs/windows/diagnostics-tests/<run-id>. |
+| Windows: CI checks | CI | Terminal results, license-tests/<run-id>, update-tests/<run-id>, portable-update-tests/<run-id>, and outputs/windows/diagnostics-tests/<run-id>. |
 | Windows: Generate synthetic fixtures | GenerateFixtures | developmentHelpers/test-data/inputs/synthetic/transport_detect_packet_size_188.ts. |
 | Windows: Build package and ZIP | Package | Assembly and symbols in OutputDirectory/packages/<run-id>; ZIP and checksum in DeployDirectory. |
 | Windows: Build Installer | Installer | ISS, marker and log in OutputDirectory/installers/<run-id>; EXE and checksum in DeployDirectory. |
@@ -168,16 +170,27 @@ cargo deny --config developmentHelpers/config/deny.toml check
 
 ### 4. Prepare the private PDF runtime
 
-  - Packaging copies the XeLaTeX input closure from a representative complete report's .fls file, together with required engine/font support files and licenses.
-  - The recorder must come from the same TeX Live installation selected by TexRoot, not from a previously bundled runtime.
-  - From the source-built GUI, export a complete LaTeX report including the relevant analysis pages and chart types. Then run these commands from the repository root:
+  - A .tex file is the report source. XeLaTeX compiles it into a .pdf. With -recorder, it also writes a .fls text file listing the inputs it used, including TeX packages and fonts. You do not write this file yourself.
+  - Packaging reads that .fls and copies the required files from the selected TexRoot, plus engine/font support files and licenses. The recorder must come from that same TeX Live installation, not a previously bundled runtime.
+  - The following example uses outputs/windows/pdf-runtime/report.tex. These are repository-relative example paths; no particular drive or user account is required.
+
+  1. From the repository root, create the report directory and start the source-built GUI:
+
+~~~powershell
+New-Item -ItemType Directory -Force -Path outputs/windows/pdf-runtime | Out-Null
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Run -Profile Debug
+~~~
+
+  2. Import representative TS files and wait for analysis to finish. In Export Analyzed Report, select LaTeX source (.tex + sections) and save as report.tex in the repository's outputs/windows/pdf-runtime/ directory. Keep the generated report_sections/ directory beside it; it contains the report sections and chart images. Close the GUI.
+  3. From the repository root, compile that report using the configured local TeX installation. This creates report_sections/build/report.pdf and report_sections/build/report.fls:
 
 ~~~powershell
 . ./developmentHelpers/scripts/windows/environment.ps1
 $devSettings = Get-DevelopmentConfiguration (Get-Location).Path
-$texSource = (Resolve-Path -LiteralPath (Read-Host 'Path to the exported report.tex')).Path
+if (-not $devSettings.TexRoot) { throw 'Configure TexRoot or make the local XeLaTeX installation discoverable first.' }
+$texSource = (Resolve-Path -LiteralPath 'outputs/windows/pdf-runtime/report.tex').Path
 $texDirectory = Split-Path -Parent $texSource
-$pdfBuild = Join-Path $texDirectory 'build'
+$pdfBuild = Join-Path $texDirectory 'report_sections/build'
 New-Item -ItemType Directory -Force -Path $pdfBuild | Out-Null
 $xelatex = Join-Path $devSettings.TexRoot 'bin/windows/xelatex.exe'
 Push-Location -LiteralPath $texDirectory
@@ -189,11 +202,20 @@ try {
 } finally {
     Pop-Location
 }
-$recorderPath = Join-Path $pdfBuild ([IO.Path]::GetFileNameWithoutExtension($texSource) + '.fls')
+$recorderPath = Join-Path $pdfBuild 'report.fls'
+if (-not (Test-Path -LiteralPath $recorderPath -PathType Leaf)) { throw 'Expected recorder was not generated.' }
+Write-Output "TexRecorder: $recorderPath"
 ~~~
 
-  - Recreate the recorder when the report template or its dependencies change, then re-run package report verification. A recorder from an incomplete report can omit needed files.
-  - This subset is for application reports; it is not a general-purpose TeX distribution.
+  4. When Windows: Build package and ZIP asks for the recorder, paste the printed TexRecorder: path without the label. For this example, the following repository-relative input is equivalent:
+
+~~~text
+outputs/windows/pdf-runtime/report_sections/build/report.fls
+~~~
+
+  - A PDF export from the source-built GUI also runs XeLaTeX with -recorder: saving outputs/windows/pdf-runtime/report.pdf creates the same report_sections/build/report.fls location. It is reusable only if that export used the selected local TeX installation.
+  - Reuse the recorder for code-only or version-only changes. Regenerate it when the report template, chart types, TeX packages, fonts, or TeX installation change. Use a complete representative report and re-run package report verification after changing PDF dependencies.
+  - The recorder and build files stay in outputs/; users receive the required private runtime in the package. This subset is for application reports, not a general-purpose TeX distribution.
 
 ### 5. Development workflow: source changes to deploy
 
@@ -203,7 +225,7 @@ $recorderPath = Join-Path $pdfBuild ([IO.Path]::GetFileNameWithoutExtension($tex
   4. Run Windows: Build package and ZIP. Enter the path to the complete .fls recorder prepared in section 4. For a code-only or version-only change, the existing recorder can be reused if the report template, dependencies, and selected TeX installation have not changed.
   5. Wait for Package to finish and copy the directory from its Package: output. It is the unpacked TS-Analyzer-windows-v<version>-x86_64 directory under outputs/windows/packages/<run-id>/.
   6. Run Windows: Build Installer and provide that exact unpacked package directory. Do not provide the ZIP filename, target/release, or an older package. Installer packages that directory; it does not recompile the Rust application.
-  7. The four versioned delivery files now appear directly under developmentHelpers/outputs/deploy/windows/. Preserve the matching symbols/ directory from the package run for debugging that release.
+  7. The four versioned delivery files now appear directly under outputs/deploy/windows/. Preserve the matching symbols/ directory from the package run for debugging that release.
   8. Record the source changes with a Conventional Commit and push the corresponding commit. When publishing, create the GitHub release tag windows-v<version> against that commit and attach the ZIP, setup EXE, and both .sha256 files. The VS Code tasks do not run Git commands or upload release assets.
 
 | Stage | Task to select in Terminal → Run Task | Input and result |
@@ -226,11 +248,23 @@ pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Run -Profil
 
 pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action CI
 
-$recorderPath = Read-Host 'Path to the complete report.fls from the configured TeX installation'
+$recorderPath = 'outputs/windows/pdf-runtime/report_sections/build/report.fls'
 pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Package -TexRecorder $recorderPath
 
 $packagePath = Read-Host 'New unpacked directory printed after Package:'
 pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Installer -Package $packagePath
+~~~
+
+  - Concrete example: if Package prints the line below, paste only the path after Package: into the Installer task. The run directory is generated for each invocation; use the value from your own build, not this example's timestamp/PID.
+
+~~~text
+Package: C:\Work\TS-Analyzer\outputs\windows\packages\20260924-080000-123-4567\TS-Analyzer-windows-v0.2.2-x86_64
+~~~
+
+  - With that example build, the equivalent repository-relative Installer command is:
+
+~~~powershell
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Installer -Package 'outputs/windows/packages/20260924-080000-123-4567/TS-Analyzer-windows-v0.2.2-x86_64'
 ~~~
 
   - Stop on a failed task and inspect its output before continuing.
@@ -240,7 +274,7 @@ pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Installer -
   - symbols/ is a development artifact outside the user ZIP. docs/usr/ is included; docs/dev/, developmentHelpers/, .vscode/, SDKs, and compilers are excluded.
 
 ~~~text
-developmentHelpers/outputs/windows/
+outputs/windows/
     state/tsan-config.toml
     packages/<run-id>/
         TS-Analyzer-windows-v<version>-x86_64/
@@ -267,7 +301,7 @@ developmentHelpers/outputs/windows/
     installation-tests/<run-id>/
     runtime-tests/<run-id>/             # probe/decode logs, registry, results.json
     report-tests/<run-id>/              # results.json and reports per recording
-developmentHelpers/outputs/deploy/
+outputs/deploy/
     windows/
         TS-Analyzer-windows-v<version>-x86_64-portable.zip
         TS-Analyzer-windows-v<version>-x86_64-portable.zip.sha256
@@ -310,8 +344,8 @@ $testOutput = Join-Path $devSettings.OutputDirectory ("installer-build-tests/" +
 ~~~
 
   - This test compiles non-executable fixtures under outputs/, checks the installer/checksum and working files, and never launches the installer. Its output is not for distribution.
-  - The tasks neither commit nor publish. Upload only the ZIP/setup EXE and checksums from developmentHelpers/outputs/deploy/windows/. The assembled package directory under outputs/ is an input for Installer and package tests.
-  - Deliverables are written directly to developmentHelpers/outputs/deploy/windows/ with versioned filenames. No historical archive directory is maintained. Timestamped build, test, and symbol directories remain under outputs/windows/.
+  - The tasks neither commit nor publish. Upload only the ZIP/setup EXE and checksums from outputs/deploy/windows/. The assembled package directory under outputs/ is an input for Installer and package tests.
+  - Deliverables are written directly to outputs/deploy/windows/ with versioned filenames. No historical archive directory is maintained. Timestamped build, test, and symbol directories remain under outputs/windows/.
   - developmentHelpers/ contains maintained build inputs as well as tooling. In particular, GUI build.rs reads packaging/platforms.toml; do not delete the whole helper tree as a cache.
 
 | Data | Installed or direct source build | Portable |
@@ -325,7 +359,7 @@ $testOutput = Join-Path $devSettings.OutputDirectory ("installer-build-tests/" +
   - An absolute TSAN_CONFIG_PATH explicitly overrides settings; empty or relative overrides fall back to the normal platform location. The Run task uses it for development state. The launcher scopes TSAN_CACHE_ROOT and TSAN_TEX_ROOT to its private runtime.
   - Uninstall preserves AppData and user-owned recordings/reports. Portable removal also removes data/ if the entire directory is deleted.
   - target/ can be deleted with builds and the application stopped; Cargo reconstructs it.
-  - developmentHelpers/outputs/ can be deleted after retaining any needed delivery ZIPs/installers under deploy/, assembled packages, logs, recorder files, or development settings. Tasks recreate outputs, but deleted state and historical validation results are not recovered.
+  - outputs/ can be deleted after retaining any needed delivery ZIPs/installers under deploy/, assembled packages, logs, recorder files, or development settings. Tasks recreate outputs, but deleted state and historical validation results are not recovered.
   - Do not delete developmentHelpers/test-data/expected/, maintained synthetic fixtures, scripts, or configuration templates as if they were build output.
 
 ## macOS
@@ -335,7 +369,7 @@ $testOutput = Join-Path $devSettings.OutputDirectory ("installer-build-tests/" +
   - The OS dispatcher selects MacosFrontend and returns a macOS-specific not-implemented error with a nonzero exit code. It receives the same AnalysisService contract as Windows.
   - Shared Rust development uses the pinned Rust toolchain and Cargo. Run cargo test --locked -p tsan-core -p tsan-input -p tsan-runtime -p tsan-platform. No Windows SDK is needed for these targets.
   - Native TSDuck integration is opt-in outside the Windows GUI: --features tsan-analyzer/native-tsduck requires a TSDuck SDK for the Cargo target via TSDUCK_HOME. Cross-builds do not discover a host SDK as a substitute.
-  - Future delivery artifacts belong in developmentHelpers/outputs/deploy/macos/. Build/test intermediates belong in developmentHelpers/outputs/macos/.
+  - Future delivery artifacts belong in outputs/deploy/macos/. Build/test intermediates belong in outputs/macos/.
 
   - The native GUI, playback integration, package build, and updater are not implemented. There is no supported full-application build/release sequence yet.
   - Platform status/version remains independently recorded under [macos] in platforms.toml.
@@ -349,7 +383,7 @@ $testOutput = Join-Path $devSettings.OutputDirectory ("installer-build-tests/" +
   - The OS dispatcher selects LinuxFrontend and returns a Linux-specific not-implemented error with a nonzero exit code. It receives the same AnalysisService contract as Windows.
   - Shared Rust development uses the pinned Rust toolchain and Cargo. Run cargo test --locked -p tsan-core -p tsan-input -p tsan-runtime -p tsan-platform.
   - Native TSDuck integration is opt-in outside the Windows GUI: --features tsan-analyzer/native-tsduck requires the target SDK via TSDUCK_HOME.
-  - Future delivery artifacts belong in developmentHelpers/outputs/deploy/linux/. Build/test intermediates belong in developmentHelpers/outputs/linux/.
+  - Future delivery artifacts belong in outputs/deploy/linux/. Build/test intermediates belong in outputs/linux/.
 
   - The native GUI, playback integration, package build, and updater are not implemented. There is no supported full-application build/release sequence yet.
   - Platform status/version remains independently recorded under [linux] in platforms.toml.

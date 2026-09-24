@@ -80,12 +80,12 @@ TS-Analyzer/
                 synthetic/
                 local/               # Optional, ignored recordings
             expected/
-        outputs/                     # Generated files; ignored by Git
-            windows/                 # Working files, test logs, symbols, dev state
-            deploy/                  # User artifacts only; no build scripts/logs
-                windows/             # Portable ZIP, setup EXE, checksums
-                macos/               # Reserved; no native package yet
-                linux/               # Reserved; no native package yet
+    outputs/                         # Generated files; ignored by Git
+        windows/                     # Working files, test logs, symbols, dev state
+        deploy/                      # User artifacts only; no build scripts/logs
+            windows/                 # Portable ZIP, setup EXE, checksums
+            macos/                   # Reserved; no native package yet
+            linux/                   # Reserved; no native package yet
     docs/
         usr/
             outlines.md
@@ -354,7 +354,7 @@ $env:TSAN_TEST_D3D11 = '1'
 cargo test --offline --locked -p tsan-player real_files_seek_to_presented_frames -- --ignored --nocapture
 Remove-Item Env:TSAN_TEST_D3D11
 $env:TSAN_REPORT_TS_DIR = 'developmentHelpers/test-data/inputs/local'
-$env:TSAN_REPORT_OUTPUT = 'developmentHelpers/outputs/windows/manual-reports'
+$env:TSAN_REPORT_OUTPUT = 'outputs/windows/manual-reports'
 cargo test --offline --locked -p tsan-gui export_recordings -- --ignored --nocapture
 ~~~
 
@@ -374,12 +374,12 @@ cargo test --offline --locked -p tsan-gui export_recordings -- --ignored --nocap
   - Window integration, playback sinks, file dialogs, runtime packaging, and update application need macOS implementations. A Windows package cannot provide them.
   - MacosFrontend and the updater return explicit macOS not-implemented errors. AnalysisService and the parser are shared; the CLI remains a placeholder.
   - Paths use ~/Library/Application Support/TS-Analyzer and ~/Library/Caches/TS-Analyzer. Missing home information is an error, not a Windows path fallback.
-  - developmentHelpers/outputs/deploy/macos is reserved for future user packages.
+  - outputs/deploy/macos is reserved for future user packages.
 
 ## Linux
 
   - LinuxFrontend and the updater return explicit Linux not-implemented errors. Native Wayland/X11 windowing, playback sinks, file dialogs, packaging, and update application are not implemented.
   - Paths use XDG_CONFIG_HOME, XDG_CACHE_HOME, and XDG_STATE_HOME; missing, empty, or relative values fall back to ~/.config, ~/.cache, and ~/.local/state. Missing home information with no valid override is an error.
-  - developmentHelpers/outputs/deploy/linux is reserved for future user packages.
+  - outputs/deploy/linux is reserved for future user packages.
   - Compositor differences belong at the platform boundary; transport parsing and report metrics should keep the same definitions.
   - Future validation must cover actual display protocols, GPU drivers, and runtime/ABI baselines. It must not infer compatibility from a compositor's name alone.

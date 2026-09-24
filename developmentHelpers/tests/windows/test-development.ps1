@@ -4,7 +4,7 @@ $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 . (Join-Path $repository 'developmentHelpers/scripts/windows/environment.ps1')
 $roots = @((Join-Path $repository 'developmentHelpers'), (Join-Path $repository '.vscode/windows'), (Join-Path $repository 'scripts/windows'))
 foreach ($root in $roots) {
-  foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.ps1' | Where-Object { $_.FullName -notlike '*\developmentHelpers\outputs\*' }) {
+  foreach ($file in Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.ps1') {
     $tokens = $null
     $errors = $null
     $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
@@ -48,7 +48,31 @@ $null = & (Join-Path $repository '.vscode/windows/Invoke-Development.ps1') -Acti
 if ($env:PATH -cne $originalPath) { throw 'Entry point leaked PATH into the caller.' }
 Write-Output 'PASS PowerShell syntax, VS Code task paths and inputs, relocatable paths, explicit config errors, exit codes, and caller environment'
 
-$fixture = New-DevelopmentOutput (Join-Path $repository 'developmentHelpers/outputs/windows') 'development-tests'
+$fixture = New-DevelopmentOutput (Join-Path $repository 'outputs/windows') 'development-tests'
+# Resolve defaults against a relocated repository, independently of the caller's directory.
+$relocatedRepository = Join-Path $fixture 'Repository with spaces'
+New-Item -ItemType Directory -Force -Path $relocatedRepository | Out-Null
+$savedOutput = $env:TSAN_DEV_OUTPUT
+$savedDeploy = $env:TSAN_DEV_DEPLOY
+Push-Location -LiteralPath $fixture
+try {
+  $env:TSAN_DEV_OUTPUT = $null
+  $env:TSAN_DEV_DEPLOY = $null
+  $settings = Get-DevelopmentConfiguration $relocatedRepository
+  if ($settings.OutputDirectory -ne (Join-Path $relocatedRepository 'outputs/windows')) { throw 'Default work output is not under the repository root.' }
+  if ($settings.DeployDirectory -ne (Join-Path $relocatedRepository 'outputs/deploy/windows')) { throw 'Default delivery output is not under the repository root.' }
+  $env:TSAN_DEV_OUTPUT = 'custom/work'
+  $env:TSAN_DEV_DEPLOY = 'custom/deploy'
+  $settings = Get-DevelopmentConfiguration $relocatedRepository
+  if ($settings.OutputDirectory -ne (Join-Path $relocatedRepository 'custom/work') -or
+      $settings.DeployDirectory -ne (Join-Path $relocatedRepository 'custom/deploy')) { throw 'Relative output overrides did not resolve against the repository.' }
+} finally {
+  Pop-Location
+  $env:TSAN_DEV_OUTPUT = $savedOutput
+  $env:TSAN_DEV_DEPLOY = $savedDeploy
+}
+Write-Output 'PASS repository-root output defaults and relative overrides from a different working directory'
+
 $vsRoot = Join-Path $fixture 'SDK with spaces'
 $runtime = Join-Path $vsRoot 'VC/Redist/custom/deep/layout/x64/CRT'
 $licenses = Join-Path $vsRoot 'Licenses'

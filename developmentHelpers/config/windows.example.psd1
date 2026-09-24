@@ -13,6 +13,6 @@
   # Optional existing unpacked package, used by Installer / VerifyRuntime / VerifyReports.
   Package = ''
   Recordings = 'developmentHelpers/test-data/inputs/local'
-  OutputDirectory = 'developmentHelpers/outputs/windows'
-  DeployDirectory = 'developmentHelpers/outputs/deploy/windows'
+  OutputDirectory = 'outputs/windows'
+  DeployDirectory = 'outputs/deploy/windows'
 }

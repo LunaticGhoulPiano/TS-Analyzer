@@ -73,7 +73,7 @@ report_sections/
 ### Logs and troubleshooting
 
   - Application, analysis, and player events are automatically written to local diagnostic files. The Log page shows the latest 4096 entries and the active diagnostic directory; Dump exports the displayed history to a chosen location.
-  - Installed and direct source builds use %LOCALAPPDATA%/TS-Analyzer/diagnostics/. Portable packages use data/diagnostics/ inside the package. The development Run task uses developmentHelpers/outputs/windows/diagnostics/. Each process creates a session-<timestamp>-<pid>/ directory.
+  - Installed and direct source builds use %LOCALAPPDATA%/TS-Analyzer/diagnostics/. Portable packages use data/diagnostics/ inside the package. The development Run task uses outputs/windows/diagnostics/. Each process creates a session-<timestamp>-<pid>/ directory.
   - application.log contains events; session.txt identifies the build and process. Rust panics add a backtrace to panic.log. On Windows, an independent collector attempts to save crash.dmp and native-crash.txt for an unhandled native exception, and records the exit code in process-exit.txt when the application exits without sending a native exception request.
   - Each application log rotates at 2 MiB with three backups. Startup cleanup aims to retain at most 20 completed sessions and 256 MiB across recognized diagnostic sessions; active sessions are protected, so these are not hard disk quotas.
   - If the preferred directory cannot be written, diagnostics try the platform user directory and then the OS temporary directory. The Log page reports the actual location or an initialization/write error.

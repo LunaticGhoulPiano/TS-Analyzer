@@ -56,7 +56,7 @@
   - Collector initialization waits at most five seconds; the exception filter waits at most fifteen seconds. If initialization fails, ordinary logging and the panic hook remain available. Forced termination, fail-fast paths bypassing the filter, an attached debugger, another component replacing the filter, and failures before initialization are not guaranteed to yield a dump.
   - Startup retention uses session identity markers and exclusive file locks. It skips active sessions, unrecognized files, nested directories, and symlinks/reparse points. The targets are 20 sessions and 256 MiB, excluding any protected data from deletion; an active dump may temporarily exceed them.
   - Release builds retain line-level symbols. Packaging stores GUI/launcher PDB files and a SHA-256 manifest under its development symbols/ directory, outside the distributed ZIP. Retain these matching symbols with each release for dump analysis.
-  - CI runs an isolated diagnostics_probe child process for ordinary exit, Rust panic, worker panic, abrupt exit, and a Windows native exception. It verifies the minidump exception stream and thread context without opening a GUI. Fixtures remain under developmentHelpers/outputs/<OS>/diagnostics-tests/.
+  - CI runs an isolated diagnostics_probe child process for ordinary exit, Rust panic, worker panic, abrupt exit, and a Windows native exception. It verifies the minidump exception stream and thread context without opening a GUI. Fixtures remain under outputs/<OS>/diagnostics-tests/.
 
 ### Liquid Glass
 
