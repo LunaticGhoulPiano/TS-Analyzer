@@ -27,7 +27,7 @@ use crate::platform::windows::{
 };
 use crate::player_worker::{PlayerCommand, PlayerSnapshot, PlayerWorkerHandle};
 use crate::report_export::{self, ExportInput, ReportFormat};
-use crate::ui_components::{ArrowScrollArea, ResizeHandle, help_text};
+use crate::ui_components::{ArrowScrollArea, ResizeHandle, help_text, help_text_size};
 use crate::update;
 
 const VIDEO_VIEWPORT_ID: &str = "tsan-video-output";
@@ -302,11 +302,11 @@ impl TsanApp {
         let settings_error = loaded.as_ref().err().cloned();
         let settings = loaded.unwrap_or_default();
         let initial_theme = match settings.theme.as_str() {
-            "System" => AppTheme::System,
             "Dark" => AppTheme::Dark,
+            "Light" => AppTheme::Light,
             "Transparent" => AppTheme::Transparent,
             "Liquid Glass" => AppTheme::LiquidGlass,
-            _ => AppTheme::Light,
+            _ => AppTheme::System,
         };
         let transparent_background_opacity = settings.opacity;
         apply_theme(
@@ -1195,9 +1195,13 @@ impl TsanApp {
                             );
                         },
                     );
-                    ui.menu_button(
+                    egui::menu::MenuButton::new(
                         egui::RichText::new("Update").size(HEADER_MENU_TEXT_SIZE),
-                        |ui| {
+                    )
+                    .config(egui::menu::MenuConfig::new().close_behavior(
+                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                    ))
+                    .ui(ui, |ui| {
                             let backend = update::platform_backend();
                             ui.strong(format!(
                                 "{} {}",
@@ -1208,12 +1212,25 @@ impl TsanApp {
                                 "Target: {}/{}",
                                 backend.target_os, backend.target_arch
                             ));
-                            help_text(ui, backend.artifact_policy);
                             ui.set_max_width(480.0);
-                            if ui.add_enabled(self.update_receiver.is_none(), egui::Button::new("Check for updates")).clicked() {
+                            ui.set_min_width(240.0);
+                            let checking = self.update_receiver.is_some();
+                            let check_label = if checking {
+                                let dots = (ui.input(|input| input.time) / 0.35) as usize % 3 + 1;
+                                ui.ctx().request_repaint_after(Duration::from_millis(350));
+                                format!("Check for updates {}", ".".repeat(dots))
+                            } else {
+                                "Check for updates".to_owned()
+                            };
+                            let check_button = egui::Button::new(
+                                egui::RichText::new(check_label).size(help_text_size(ui)),
+                            ).min_size(egui::vec2(ui.available_width(), 0.0));
+                            if ui.add_enabled(!checking && self.update_download.is_none(), check_button).clicked() {
+                                self.update_status = None;
+                                self.staged_update = None;
                                 self.update_receiver = Some(update::start_check());
+                                ui.ctx().request_repaint();
                             }
-                            if self.update_receiver.is_some() { ui.spinner(); ui.label("Checking GitHub Releases..."); }
                             if let Some(update::UpdateStatus::Available(release)) = &self.update_status {
                                 if self.staged_update.is_none() && ui.add_enabled(self.update_download.is_none(), egui::Button::new("Download verified update")).clicked() {
                                     self.update_download = Some(update::start_download(release.clone()));
@@ -1229,7 +1246,7 @@ impl TsanApp {
                             if let Some(status) = &self.update_status {
                                 ui.separator();
                                 ui.add(egui::Label::new(status.message()).wrap());
-                            } else {
+                            } else if self.update_receiver.is_none() {
                                 help_text(ui, "No update check has been run.");
                             }
                             include_popup_rectangle(

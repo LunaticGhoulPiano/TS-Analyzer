@@ -45,6 +45,8 @@
   3. The application closes while the update worker waits for it to exit. Keep the destination drive connected.
   4. A successful update restarts the application from its original location.
 
+  - While checking, Check for updates displays animated dots and cannot be clicked again. The menu stays open to show the result; click outside it to close.
+
   - Installed copies use the new installer and retain the same installation directory, shortcuts, and uninstall identity.
   - Portable copies replace the managed program files in the existing portable directory and preserve data/.
   - The updater selects the asset for the current platform and distribution mode. It does not switch a portable copy into an installation.

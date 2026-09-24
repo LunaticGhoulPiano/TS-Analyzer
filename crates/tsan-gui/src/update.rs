@@ -7,7 +7,6 @@ pub struct PlatformUpdateBackend {
     pub platform: &'static str,
     pub target_os: &'static str,
     pub target_arch: &'static str,
-    pub artifact_policy: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,7 +72,6 @@ pub fn platform_backend() -> PlatformUpdateBackend {
         platform: tsan_platform::OperatingSystem::current().name(),
         target_os: std::env::consts::OS,
         target_arch: std::env::consts::ARCH,
-        artifact_policy: "Checks stable GitHub Releases. Packages must match the OS/architecture and GitHub SHA-256 digest.",
     }
 }
 

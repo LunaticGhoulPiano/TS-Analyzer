@@ -12,7 +12,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "Light".into(),
+            theme: "System".into(),
             opacity: 195,
             player_backend: if cfg!(windows) { "d3d12" } else { "auto" }.into(),
             recent_files: Vec::new(),

@@ -55,6 +55,7 @@ report_sections/
 ### Themes and Liquid Glass
 
   - Theme provides System, Light, Dark, Transparent, and Liquid Glass (experimental). Opacity and glass controls open in submenus.
+  - System is the default for new settings and follows the operating system's appearance. An existing saved theme is restored on startup.
   - Liquid Glass uses the desktop behind the window. Its controls include refraction, frost, RGB dispersion, magnification, lens depth, dark tint, and squircle shape.
   - Live glass excludes the main application window from capture tools that honor Windows capture exclusion. To take an ordinary screenshot, select Freeze background / screenshot mode from the glass submenu.
   - Freeze keeps the captured background in memory and stops live capture. Resume live background explicitly to start updating it again.

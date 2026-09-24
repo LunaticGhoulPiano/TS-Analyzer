@@ -2,9 +2,13 @@ use std::ops::Range;
 
 use eframe::egui;
 
+pub fn help_text_size(ui: &egui::Ui) -> f32 {
+    egui::TextStyle::Body.resolve(ui.style()).size.max(16.0)
+}
+
 /// Readable instructions shared by analysis, player and menus.
 pub fn help_text(ui: &mut egui::Ui, text: impl ToString) -> egui::Response {
-    let size = egui::TextStyle::Body.resolve(ui.style()).size.max(16.0);
+    let size = help_text_size(ui);
     ui.add(
         egui::Label::new(
             egui::RichText::new(text.to_string())
