@@ -61,8 +61,8 @@ if (-not (Test-Path -LiteralPath developmentHelpers/config/windows.local.psd1)) 
 | TexRecorder | TSAN_DEV_TEX_RECORDER | Complete representative report's .fls from the selected TeX installation. |
 | Recordings | TSAN_TEST_RECORDINGS | Local TS directory; defaults to developmentHelpers/test-data/inputs/local. |
 | OutputDirectory | TSAN_DEV_OUTPUT | Intermediate files, logs and developer state; defaults to outputs/windows. |
-| DeployDirectory | TSAN_DEV_DEPLOY | User ZIP, installer and checksums; defaults to outputs/deploy/windows. |
-| Package | — | Existing unpacked package used by Installer and package verification. |
+| DeployDirectory | TSAN_DEV_DEPLOY | Delivery root; defaults to outputs/deploy/windows. Deploy creates a TS-Analyzer-windows-v<version>-x86_64/ child containing both formats and checksums. |
+| Package | — | Existing unpacked package used by package verification and the optional low-level Installer action; Deploy passes its newly built package automatically. |
 
   - Generated work and delivery files live under the repository root outputs/ and are ignored by Git. developmentHelpers/ contains maintained tooling, configuration, and test resources. Cargo output remains in target/.
   - If an existing local configuration or TSAN_DEV_OUTPUT, TSAN_DEV_DEPLOY, or TSAN_DEV_TEX_RECORDER override still points to the former output location, update that override to the new root. Explicit overrides continue to take precedence.
@@ -106,7 +106,7 @@ pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action CI
 ~~~
 
   - Close the application before continuing from Run.
-  - CI checks formatting, development scripts/tasks, locked Rust license collection, workspace tests (including isolated panic/native crash recovery), update-archive rejection cases, release selection, and portable replacement/rollback. It does not build an installer, publish a release, or run ignored GPU/window/recording tests.
+  - CI checks formatting, development scripts/tasks and complete delivery-folder handling, locked Rust license collection, workspace tests (including isolated panic/native crash recovery), update-archive rejection cases, release selection, and portable replacement/rollback. It does not build an installer, publish a release, or run ignored GPU/window/recording tests.
   - The same entry works in a configured Windows CI runner. No repository GitHub auto-publish workflow is currently provided.
   - Direct Cargo use remains available. Prepare the current PowerShell process's native SDK paths first:
 
@@ -142,9 +142,9 @@ cargo deny --config developmentHelpers/config/deny.toml check
 
   - Open the repository root as the workspace. Terminal → Run Task lists the Windows tasks; Ctrl+Shift+B runs Windows: Build debug.
   - .vscode/tasks.json calls the adapter under .vscode/windows/, which forwards to developmentHelpers/scripts/windows/Invoke-Development.ps1. A tasks.json placed only inside a subdirectory is not automatically loaded.
-  - Package prompts for a .fls file; Installer prompts for an unpacked package; package tests also prompt for recordings. These inputs are not saved automatically.
+  - Deploy prompts once for a .fls file and automatically passes its new package to the installer build. Package verification tasks prompt for an existing package and recordings. Prompted inputs are not saved automatically.
   - outputs/ is ignored as a whole. Generated directories are created when a task needs them; .gitkeep files are not used there. The macOS/Linux delivery paths reserve the future layout, not tracked empty folders.
-  - Each packaging/test run uses a new UTC yyyyMMdd-HHmmss-fff-PID directory under OutputDirectory. Deliverables go to DeployDirectory; existing versioned ZIPs/installers are never overwritten.
+  - Each packaging/test run uses a new UTC yyyyMMdd-HHmmss-fff-PID directory under OutputDirectory. Deliverables go to DeployDirectory/TS-Analyzer-windows-v<version>-x86_64/; existing completed releases are never overwritten.
 
 | VS Code task | Action | Output |
 | --- | --- | --- |
@@ -154,8 +154,7 @@ cargo deny --config developmentHelpers/config/deny.toml check
 | Windows: Test workspace | Test | Cargo test results; individual tests may use OS temporary directories. |
 | Windows: CI checks | CI | Terminal results, license-tests/<run-id>, update-tests/<run-id>, portable-update-tests/<run-id>, and outputs/windows/diagnostics-tests/<run-id>. |
 | Windows: Generate synthetic fixtures | GenerateFixtures | developmentHelpers/test-data/inputs/synthetic/transport_detect_packet_size_188.ts. |
-| Windows: Build package and ZIP | Package | Assembly and symbols in OutputDirectory/packages/<run-id>; ZIP and checksum in DeployDirectory. |
-| Windows: Build Installer | Installer | ISS, marker and log in OutputDirectory/installers/<run-id>; EXE and checksum in DeployDirectory. |
+| Windows: Build deploy (Portable + Installer) | Deploy | Runs CI, compiles Release, builds ZIP and Installer, verifies checksums, and creates DeployDirectory/TS-Analyzer-windows-v<version>-x86_64/. Working files and symbols stay in OutputDirectory. |
 | Windows: Validate development scripts | VerifyDevelopment | Terminal validation results. |
 | Windows: Verify update archives | VerifyUpdate | OutputDirectory/update-tests and portable-update-tests. |
 | Windows: Verify installation lifecycle | VerifyInstallation | OutputDirectory/installation-tests/<run-id>. |
@@ -207,7 +206,7 @@ if (-not (Test-Path -LiteralPath $recorderPath -PathType Leaf)) { throw 'Expecte
 Write-Output "TexRecorder: $recorderPath"
 ~~~
 
-  4. When Windows: Build package and ZIP asks for the recorder, paste the printed TexRecorder: path without the label. For this example, the following repository-relative input is equivalent:
+  4. When Windows: Build deploy (Portable + Installer) asks for the recorder, paste the printed TexRecorder: path without the label. For this example, the following repository-relative input is equivalent:
 
 ~~~text
 outputs/windows/pdf-runtime/report_sections/build/report.fls
@@ -219,96 +218,74 @@ outputs/windows/pdf-runtime/report_sections/build/report.fls
 
 ### 5. Development workflow: source changes to deploy
 
-  1. Edit the source. For an application release, also change version under [windows] in developmentHelpers/packaging/platforms.toml, for example 0.2.1 to 0.2.2. Changing the Cargo workspace crate version alone does not advance the Windows application release. Keep the installer AppId unchanged.
-  2. During development, use Windows: Run debug to rebuild changed code and run the GUI. Close the GUI before packaging. Windows: Build debug compiles without running; Windows: Build release produces optimized Cargo binaries only.
-  3. Run Windows: CI checks. Fix failures before producing deliverables. CI checks formatting, scripts, locked Rust license collection, workspace tests, and the existing automated update fixtures; it does not publish anything.
-  4. Run Windows: Build package and ZIP. Enter the path to the complete .fls recorder prepared in section 4. For a code-only or version-only change, the existing recorder can be reused if the report template, dependencies, and selected TeX installation have not changed.
-  5. Wait for Package to finish and copy the directory from its Package: output. It is the unpacked TS-Analyzer-windows-v<version>-x86_64 directory under outputs/windows/packages/<run-id>/.
-  6. Run Windows: Build Installer and provide that exact unpacked package directory. Do not provide the ZIP filename, target/release, or an older package. Installer packages that directory; it does not recompile the Rust application.
-  7. The four versioned delivery files now appear directly under outputs/deploy/windows/. Preserve the matching symbols/ directory from the package run for debugging that release.
-  8. Record the source changes with a Conventional Commit and push the corresponding commit. When publishing, create the GitHub release tag windows-v<version> against that commit and attach the ZIP, setup EXE, and both .sha256 files. The VS Code tasks do not run Git commands or upload release assets.
+  1. Edit the source. For an application release, also change version under [windows] in developmentHelpers/packaging/platforms.toml, for example 0.2.1 to 0.2.2. The Cargo workspace version is separate. Keep the installer AppId unchanged.
+  2. During development, use Windows: Run debug to rebuild changed code and run the GUI. Close the GUI before building delivery files.
+  3. Run **Windows: Build deploy (Portable + Installer)** once. Enter the complete .fls path prepared in section 4, or leave the input empty to use TexRecorder in the local configuration or TSAN_DEV_TEX_RECORDER. An unchanged report template and TeX installation can reuse the recorder.
+  4. The task checks required tools, runs CI, compiles the Release GUI and launcher, assembles the private runtimes/licenses, builds the Portable ZIP, builds the Installer from that exact new package, and verifies both checksums. It does not ask for a package directory or require another task.
+  5. On success, copy the four files from the directory printed after Deploy:. With Windows version 0.2.2, this is outputs/deploy/windows/TS-Analyzer-windows-v0.2.2-x86_64/. Preserve the corresponding package run's symbols/ for debugging that release.
+  6. Record source changes with a Conventional Commit and push. To publish, create a GitHub release with tag windows-v<version> against that commit and upload the four delivery files. The task does not install the application or publish to GitHub.
 
-| Stage | Task to select in Terminal → Run Task | Input and result |
+| Stage | Task to select in Terminal -> Run Task | Behavior |
 | --- | --- | --- |
-| Local development | Windows: Run debug | Recompiles changed code, then opens the GUI. |
-| Pre-delivery checks | Windows: CI checks | Produces terminal results and development test outputs. |
-| Compile and assemble portable delivery | Windows: Build package and ZIP | Prompts for .fls; rebuilds the release GUI and launcher, collects private runtimes/licenses, writes the ZIP and checksum. |
-| Build installed delivery | Windows: Build Installer | Prompts for the new unpacked package; writes the setup EXE and checksum. |
+| Local development | Windows: Run debug | Recompiles changed code and opens the GUI. |
+| Checks only | Windows: CI checks | Runs the checks without building user deliverables. |
+| Complete delivery | Windows: Build deploy (Portable + Installer) | Runs CI, builds both formats, checks hashes, and groups the four files by platform/version/architecture. |
 
-  - Even a one-line version change requires Package again, then Installer against the newly printed package directory. Cargo recompiles affected targets incrementally; packaging assembles the complete user delivery again.
-  - A separate Windows: Build release task is not required before Package because Package already compiles the release application. Build alone does not refresh deploy/.
-  - Installer reads the version from the chosen package.toml. A stale package path therefore produces a stale installer even if platforms.toml has been edited.
-  - Existing same-version delivery filenames cause an error. Use a new version for a new published release; unpublished local artifacts can be deliberately removed before rebuilding that same version. There is no automatic overwrite or archive directory.
-
-  - Equivalent PowerShell commands from the repository root, after saving the source and version edits:
+  - Equivalent PowerShell command from the repository root:
 
 ~~~powershell
-# Optional local development run; close the GUI before continuing.
-pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Run -Profile Debug
-
-pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action CI
-
-$recorderPath = 'outputs/windows/pdf-runtime/report_sections/build/report.fls'
-pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Package -TexRecorder $recorderPath
-
-$packagePath = Read-Host 'New unpacked directory printed after Package:'
-pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Installer -Package $packagePath
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Deploy -TexRecorder 'outputs/windows/pdf-runtime/report_sections/build/report.fls'
 ~~~
 
-  - Concrete example: if Package prints the line below, paste only the path after Package: into the Installer task. The run directory is generated for each invocation; use the value from your own build, not this example's timestamp/PID.
+  - The .fls path above is the concrete result of section 4. Use the actual path of your recorder if it is elsewhere. To avoid entering it each time, set a repository-relative TexRecorder in developmentHelpers/config/windows.local.psd1; then leave the task prompt empty or omit -TexRecorder on the command line.
+  - A separate CI, Build release, Package, or Installer invocation is not required before or after Deploy. Even a one-line code/version change uses the same Deploy task; Cargo rebuilds affected targets incrementally.
+  - Inno Setup must be available before Deploy starts. Missing tools or an existing version's delivery folder stop the task before expensive compilation. Failed CI, compilation, or packaging stops the chain.
+  - ZIP and Installer are first built under outputs/windows/packages/<run-id>/artifacts/. Only after both exist and their checksums match are the four files copied into the versioned delivery folder. Failed builds retain intermediate files/logs but do not create a completed delivery folder. A retry uses a new working run directory.
+  - An existing versioned delivery folder is never replaced automatically. Use a new version for a new release, or deliberately remove an unpublished local delivery before rebuilding that same version. There is no archive directory. Older flat delivery files are not used as inputs to Deploy.
+  - The legacy command-line action Package is an alias for the complete Deploy workflow. The low-level Installer action and build-package.ps1/build-installer.ps1 remain available for development diagnostics; the normal VS Code workflow exposes one delivery task.
+  - Deploy resolves Cargo's target_directory and builds tsan-launcher with a static CRT. The installer keeps the same application identity and receives this invocation's package directly.
+  - Release builds retain line-level debug information. Packaging keeps tsan_gui.pdb and tsan_launcher.pdb in symbols/, with executable/PDB SHA-256 values and the platform version in symbols/manifest.json. These developer files stay outside the user ZIP and Installer.
+  - User packages include docs/usr/ and licenses/. They exclude docs/dev/, developmentHelpers/, .vscode/, SDKs, and compilers.
 
 ~~~text
-Package: C:\Work\TS-Analyzer\outputs\windows\packages\20260924-080000-123-4567\TS-Analyzer-windows-v0.2.2-x86_64
-~~~
-
-  - With that example build, the equivalent repository-relative Installer command is:
-
-~~~powershell
-pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Installer -Package 'outputs/windows/packages/20260924-080000-123-4567/TS-Analyzer-windows-v0.2.2-x86_64'
-~~~
-
-  - Stop on a failed task and inspect its output before continuing.
-  - Package first builds the release GUI, resolves Cargo's target_directory, assembles the private runtime, builds tsan-launcher through Cargo with a static CRT, and checks its platform/version identity.
-  - Installer compiles the formal Inno Setup EXE. The generated ISS uses relocatable source paths; cross-drive source locations are supplied to that invocation rather than saved as machine-specific paths.
-  - Release builds retain line-level debug information. Packaging requires tsan_gui.pdb and tsan_launcher.pdb, copies them into symbols/, and records executable/PDB SHA-256 values plus the platform version in symbols/manifest.json. Preserve the matching symbols for each release to inspect crash.dmp in a Windows debugger.
-  - symbols/ is a development artifact outside the user ZIP. docs/usr/ is included; docs/dev/, developmentHelpers/, .vscode/, SDKs, and compilers are excluded.
-
-~~~text
-outputs/windows/
-    state/tsan-config.toml
-    packages/<run-id>/
-        TS-Analyzer-windows-v<version>-x86_64/
-            TS-Analyzer.exe
-            deployment.toml
-            app/
-            runtime/
-            scripts/windows/fetch-release.ps1
-            docs/usr/outlines.md
-            docs/usr/sections/CH*.md
-            licenses/
-            package.toml
-            build-info.toml
-            README.txt
-            SHA256SUMS
-        symbols/
-    installers/<run-id>/
-        installer.iss
-        installed.toml
-        compiler.log
-    license-tests/<run-id>/             # collected licenses and regression fixtures
-    update-tests/<run-id>/
-    portable-update-tests/<run-id>/
-    installation-tests/<run-id>/
-    runtime-tests/<run-id>/             # probe/decode logs, registry, results.json
-    report-tests/<run-id>/              # results.json and reports per recording
-outputs/deploy/
+outputs/
     windows/
-        TS-Analyzer-windows-v<version>-x86_64-portable.zip
-        TS-Analyzer-windows-v<version>-x86_64-portable.zip.sha256
-        TS-Analyzer-windows-v<version>-x86_64-setup.exe
-        TS-Analyzer-windows-v<version>-x86_64-setup.exe.sha256
-    macos/                             # Reserved; packaging not implemented
-    linux/                             # Reserved; packaging not implemented
+        state/tsan-config.toml
+        packages/<run-id>/
+            TS-Analyzer-windows-v<version>-x86_64/
+                TS-Analyzer.exe
+                deployment.toml
+                app/
+                runtime/
+                scripts/windows/fetch-release.ps1
+                docs/usr/
+                licenses/
+                package.toml
+                build-info.toml
+                README.txt
+                SHA256SUMS
+            symbols/
+            artifacts/                 # ZIP, setup EXE, checksums before completion
+        installers/<run-id>/
+            installer.iss
+            installed.toml
+            compiler.log
+        development-tests/<run-id>/
+        license-tests/<run-id>/
+        update-tests/<run-id>/
+        portable-update-tests/<run-id>/
+        installation-tests/<run-id>/
+        runtime-tests/<run-id>/
+        report-tests/<run-id>/
+    deploy/
+        windows/
+            TS-Analyzer-windows-v0.2.2-x86_64/
+                TS-Analyzer-windows-v0.2.2-x86_64-portable.zip
+                TS-Analyzer-windows-v0.2.2-x86_64-portable.zip.sha256
+                TS-Analyzer-windows-v0.2.2-x86_64-setup.exe
+                TS-Analyzer-windows-v0.2.2-x86_64-setup.exe.sha256
+        macos/                         # Reserved; packaging not implemented
+        linux/                         # Reserved; packaging not implemented
 ~~~
 
 ### Third-party license collection
@@ -319,7 +296,7 @@ outputs/deploy/
   - Missing/empty license text, a mismatched supplement checksum, or changed source/SPDX metadata fails packaging. On dependency upgrades, review the new upstream revision and update any required supplement files and sources.json; do not reuse an older version's entry automatically.
   - Windows: CI checks runs test-rust-licenses.ps1 against the current Windows dependency inventory and exercises rejection cases. Its license files and fixtures stay under outputs/windows/license-tests/<run-id>/.
   - Native GStreamer, TSDuck, MSVC, and TeX notices are collected from the selected runtime installations into the assembled package's licenses/ directory. They are not replaced with the Rust supplements or the project's own LICENSE.
-  - Both the portable ZIP and the installer include the assembled licenses/ directory. Rebuild Package, then Installer, to include changed notices in a new delivery.
+  - Both the portable ZIP and the installer include the assembled licenses/ directory. Run Deploy again for a new release to include changed notices in both delivery formats.
 
 ### Versions, installation identity, and updates
 
@@ -344,8 +321,8 @@ $testOutput = Join-Path $devSettings.OutputDirectory ("installer-build-tests/" +
 ~~~
 
   - This test compiles non-executable fixtures under outputs/, checks the installer/checksum and working files, and never launches the installer. Its output is not for distribution.
-  - The tasks neither commit nor publish. Upload only the ZIP/setup EXE and checksums from outputs/deploy/windows/. The assembled package directory under outputs/ is an input for Installer and package tests.
-  - Deliverables are written directly to outputs/deploy/windows/ with versioned filenames. No historical archive directory is maintained. Timestamped build, test, and symbol directories remain under outputs/windows/.
+  - The tasks neither commit nor publish. Upload only the four files from outputs/deploy/windows/TS-Analyzer-windows-v<version>-x86_64/. The assembled package remains under outputs/windows/ for verification and debugging.
+  - Each completed release has its own formatted folder under outputs/deploy/windows/. Timestamped build, test, and symbol directories remain under outputs/windows/.
   - developmentHelpers/ contains maintained build inputs as well as tooling. In particular, GUI build.rs reads packaging/platforms.toml; do not delete the whole helper tree as a cache.
 
 | Data | Installed or direct source build | Portable |

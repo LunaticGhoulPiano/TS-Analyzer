@@ -33,6 +33,9 @@ foreach ($task in $tasks.tasks) {
     if ($argument -match '^[A-Za-z]:[\\/]|^\\\\') { throw "Task arguments must not contain fixed machine paths: $($task.label)" }
   }
 }
+$deployTasks = @($tasks.tasks | Where-Object { $_.args -contains 'Deploy' })
+if ($deployTasks.Count -ne 1 -or $deployTasks[0].args -contains '-Package') { throw 'Provide one complete Deploy task without a manual package-directory handoff.' }
+if (@($tasks.tasks | Where-Object { $_.args -contains 'Package' -or $_.args -contains 'Installer' }).Count -ne 0) { throw 'Split packaging tasks must not replace the complete delivery workflow.' }
 $relocated = 'D:\Work Folder\TS Analyzer'
 $resolved = Resolve-DevelopmentPath 'developmentHelpers/test-data/inputs/local' $relocated
 if ($resolved -ne 'D:\Work Folder\TS Analyzer\developmentHelpers\test-data\inputs\local') { throw "Relative resolution failed: $resolved" }
@@ -80,3 +83,5 @@ New-Item -ItemType Directory -Force -Path $runtime, $licenses | Out-Null
 if ((Find-MsvcLicenses $runtime) -ne $licenses) { throw 'MSVC licenses depend on a fixed ancestor count.' }
 if (Find-MsvcLicenses (Join-Path $fixture 'missing')) { throw 'Missing runtime must not select unrelated licenses.' }
 Write-Output 'PASS MSVC license discovery with a relocated SDK and variable nesting depth'
+
+& (Join-Path $PSScriptRoot 'test-deployment.ps1') -OutputDirectory (Join-Path $fixture 'deployment')

@@ -14,5 +14,6 @@
   Package = ''
   Recordings = 'developmentHelpers/test-data/inputs/local'
   OutputDirectory = 'outputs/windows'
+  # Deploy creates a platform/version/architecture folder beneath this root.
   DeployDirectory = 'outputs/deploy/windows'
 }

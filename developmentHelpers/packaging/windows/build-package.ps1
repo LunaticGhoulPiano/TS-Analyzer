@@ -14,9 +14,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 . (Join-Path $PSScriptRoot 'pe-dependencies.ps1')
-$platforms = Get-Content -Raw -LiteralPath (Join-Path $repository 'developmentHelpers/packaging/platforms.toml')
-$platformSection = [regex]::Match($platforms, '(?ms)^\[windows\]\s*(.*?)(?=^\[|\z)').Groups[1].Value
-$declaredVersion = [regex]::Match($platformSection, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+. (Join-Path $PSScriptRoot 'deployment.ps1')
+$declaredVersion = Get-WindowsReleaseVersion $repository
 if (-not $Version) { $Version = $declaredVersion }
 if ($Version -ne $declaredVersion) { throw 'Package version must match developmentHelpers/packaging/platforms.toml [windows]' }
 if (-not $AppExe) {
@@ -29,7 +28,8 @@ if (-not $AppExe) {
 }
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be major.minor.patch' }
 $DeployDirectory = [IO.Path]::GetFullPath($DeployDirectory)
-$package = [IO.Path]::GetFullPath((Join-Path $OutputDirectory "TS-Analyzer-windows-v$Version-x86_64"))
+$packageName = Get-WindowsPackageName $Version
+$package = [IO.Path]::GetFullPath((Join-Path $OutputDirectory $packageName))
 if ($DeployDirectory.Equals($package, [StringComparison]::OrdinalIgnoreCase) -or
     $DeployDirectory.StartsWith($package + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Archive delivery must be outside the package input directory.' }
 if (Test-Path -LiteralPath $package) { throw "Package output already exists; use a new output directory: $package" }
@@ -221,7 +221,7 @@ $hashes = $files | ForEach-Object {
 $hashes | Set-Content -Encoding utf8 -LiteralPath (Join-Path $package 'SHA256SUMS')
 if (-not $SkipArchive) {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $zip = Join-Path $DeployDirectory "TS-Analyzer-windows-v$Version-x86_64-portable.zip"
+  $zip = Join-Path $DeployDirectory "$packageName-portable.zip"
   if ((Test-Path -LiteralPath $zip) -or (Test-Path -LiteralPath "$zip.sha256")) { throw 'Deployment artifact already exists; do not replace a published version.' }
   New-Item -ItemType Directory -Force -Path $DeployDirectory | Out-Null
   [IO.Compression.ZipFile]::CreateFromDirectory($package, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)

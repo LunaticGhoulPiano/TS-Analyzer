@@ -151,7 +151,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Windows: Build package and ZIP",
+      "label": "Windows: Build deploy (Portable + Installer)",
       "type": "process",
       "command": "pwsh",
       "args": [
@@ -159,7 +159,7 @@
         "-File",
         "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
         "-Action",
-        "Package",
+        "Deploy",
         "-Profile",
         "Release",
         "-TexRecorder",
@@ -168,27 +168,8 @@
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "problemMatcher": []
-    },
-    {
-      "label": "Windows: Build Installer",
-      "type": "process",
-      "command": "pwsh",
-      "args": [
-        "-NoProfile",
-        "-File",
-        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
-        "-Action",
-        "Installer",
-        "-Profile",
-        "Release",
-        "-Package",
-        "${input:packageDirectory}"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": []
+      "problemMatcher": [],
+      "detail": "Run CI, compile Release, build Portable ZIP and Installer, then collect checksums in one versioned delivery folder."
     },
     {
       "label": "Windows: Validate development scripts",
@@ -291,7 +272,8 @@
     {
       "id": "texRecorder",
       "type": "promptString",
-      "description": "XeLaTeX recorder from the configured TeX installation, e.g. outputs/windows/pdf-runtime/report_sections/build/report.fls (absolute or repository-relative)"
+      "description": "XeLaTeX recorder, e.g. outputs/windows/pdf-runtime/report_sections/build/report.fls; leave empty to use TexRecorder from local config or TSAN_DEV_TEX_RECORDER",
+      "default": ""
     },
     {
       "id": "packageDirectory",

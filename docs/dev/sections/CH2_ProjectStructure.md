@@ -83,7 +83,7 @@ TS-Analyzer/
     outputs/                         # Generated files; ignored by Git
         windows/                     # Working files, test logs, symbols, dev state
         deploy/                      # User artifacts only; no build scripts/logs
-            windows/                 # Portable ZIP, setup EXE, checksums
+            windows/                 # One formatted folder per complete release
             macos/                   # Reserved; no native package yet
             linux/                   # Reserved; no native package yet
     docs/
@@ -127,16 +127,21 @@ flowchart TD
     cpp --> sdk["TSDuck SDK and MSVC linker"]
     rust --> binary["target/debug or target/release"]
     sdk --> binary
-    binary --> package["Package: app + private runtime + user docs + licenses"]
+    dev --> deploy["Deploy: one delivery task"]
+    deploy --> ci["CI checks and delivery preflight"]
+    ci --> cargo
+    binary --> package["New package: app + private runtime + user docs + licenses"]
     cargo --> launcher["tsan-launcher: static CRT"]
     launcher --> package
-    package --> zip["outputs/deploy/windows: Portable ZIP + SHA-256"]
-    package --> inno["Installer: generated ISS + ISCC"]
-    inno --> setup["outputs/deploy/windows: setup EXE + SHA-256"]
+    package --> zip["Portable ZIP + SHA-256 in working artifacts"]
+    zip --> inno["Installer: same package, generated ISS + ISCC"]
+    inno --> setup["Setup EXE + SHA-256 in working artifacts"]
+    setup --> complete["Verify all four files and complete delivery"]
+    complete --> delivery["outputs/deploy/windows/TS-Analyzer-windows-vVERSION-x86_64/"]
     dev --> work["outputs/windows: assembly, ISS, logs, symbols"]
 ~~~
 
-  - Build/Run/Test/CI and packaging commands, prerequisites, and each output directory are in [Chapter 1](CH1_DevelopmentFromSource.md).
+  - Build/Run/Test/CI/Deploy commands, prerequisites, and each output directory are in [Chapter 1](CH1_DevelopmentFromSource.md).
   - The launcher is compiled during packaging. GStreamer, TSDuck, MSVC CRT, and the report's XeLaTeX subset remain private to the distributed application.
 
 ### 元件與實際依賴

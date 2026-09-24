@@ -1,7 +1,7 @@
 #requires -Version 7.0
 [CmdletBinding()]
 param(
-  [ValidateSet('CheckEnvironment','Build','Run','Test','CI','GenerateFixtures','Package','Installer','VerifyDevelopment','VerifyUpdate','VerifyRuntime','VerifyReports','VerifyInstallation')]
+  [ValidateSet('CheckEnvironment','Build','Run','Test','CI','GenerateFixtures','Deploy','Package','Installer','VerifyDevelopment','VerifyUpdate','VerifyRuntime','VerifyReports','VerifyInstallation')]
   [string]$Action = 'CheckEnvironment',
   [ValidateSet('Debug','Release')][string]$Profile = 'Debug',
   [string]$Configuration,
@@ -22,6 +22,7 @@ foreach ($name in @('Package','Recordings','TexRecorder','OutputDirectory','Depl
 }
 $testScripts = Join-Path $repository 'developmentHelpers/tests/windows'
 $packageScripts = Join-Path $repository 'developmentHelpers/packaging/windows'
+. (Join-Path $packageScripts 'deployment.ps1')
 
 function Require-Package {
   $selected = $settings.Package
@@ -51,8 +52,8 @@ $previousEnvironment = @{}
 foreach ($name in $environmentNames) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name) }
 Push-Location -LiteralPath $repository
 try {
-  if ($Action -in @('Build','Run','Test','CI','Package','GenerateFixtures','VerifyUpdate','VerifyInstallation')) { Require-RustToolchain }
-  if ($Action -in @('Build','Run','Test','CI','Package')) { Enable-DevelopmentEnvironment $settings }
+  if ($Action -in @('Build','Run','Test','CI','Deploy','Package','GenerateFixtures','VerifyUpdate','VerifyInstallation')) { Require-RustToolchain }
+  if ($Action -in @('Build','Run','Test','CI','Deploy','Package')) { Enable-DevelopmentEnvironment $settings }
   switch ($Action) {
     'CheckEnvironment' {
       foreach ($name in @('GStreamerRoot','TSDuckRoot','TexRoot','InnoCompiler')) {
@@ -102,26 +103,48 @@ try {
       Invoke-DevelopmentTool $windowsPowerShell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $testScripts 'test-fetch-release.ps1'))
       Invoke-DevelopmentTool $windowsPowerShell @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $testScripts 'test-portable-update.ps1'),'-OutputDirectory',$portableOut)
     }
-    'Package' {
+    { $_ -in @('Deploy','Package') } {
+      if (-not $settings.InnoCompiler -or -not (Test-Path -LiteralPath $settings.InnoCompiler -PathType Leaf)) {
+        throw 'Inno Setup compiler not found. Set InnoCompiler or ISCC_EXE before building the complete deployment.'
+      }
+      $version = Get-WindowsReleaseVersion $repository
+      $packageName = Get-WindowsPackageName $version
+      $delivery = Join-Path $settings.DeployDirectory $packageName
+      if (Test-Path -LiteralPath $delivery) { throw "Delivery already exists: $delivery. Use a new release version or explicitly remove an unpublished local build." }
       if (-not $settings.TexRecorder -or -not (Test-Path -LiteralPath $settings.TexRecorder -PathType Leaf)) {
-        throw 'Package requires -TexRecorder <report.fls> from a representative complete XeLaTeX report.'
+        throw 'Deploy requires -TexRecorder <report.fls> from a representative complete XeLaTeX report.'
       }
       if (-not $settings.MsvcRuntime) { $settings.MsvcRuntime = Find-MsvcRuntime }
       if (-not $settings.MsvcLicenses) { $settings.MsvcLicenses = Find-MsvcLicenses $settings.MsvcRuntime }
       if (-not $settings.MsvcLicenses) { throw 'MSVC licenses not found. Set MsvcLicenses or TSAN_DEV_MSVC_LICENSES for the selected runtime.' }
       if (-not $settings.MsvcRuntime -or -not $settings.TexRoot) { throw 'Configure MsvcRuntime and TexRoot in windows.local.psd1.' }
+      Write-Output '[1/4] CI checks'
+      & $PSCommandPath -Action CI -Configuration $Configuration -OutputDirectory $settings.OutputDirectory -DeployDirectory $settings.DeployDirectory
+      Write-Output '[2/4] Compile release and build portable ZIP'
       Invoke-DevelopmentTool 'cargo' @('build','--locked','--offline','--release','-p','tsan-gui')
       $metadata = & cargo metadata --offline --locked --no-deps --format-version 1
       if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
       $target = ($metadata | ConvertFrom-Json).target_directory
       $out = New-DevelopmentOutput $settings.OutputDirectory 'packages'
-      & (Join-Path $packageScripts 'build-package.ps1') -OutputDirectory $out -DeployDirectory $settings.DeployDirectory -MsvcLicenses $settings.MsvcLicenses -GStreamerRoot $settings.GStreamerRoot -TSDuckRoot $settings.TSDuckRoot -MsvcRuntime $settings.MsvcRuntime -TexRoot $settings.TexRoot -TexRecorder $settings.TexRecorder -AppExe (Join-Path $target 'release/tsan-gui.exe')
+      $artifacts = Join-Path $out 'artifacts'
+      & (Join-Path $packageScripts 'build-package.ps1') -OutputDirectory $out -DeployDirectory $artifacts -MsvcLicenses $settings.MsvcLicenses -GStreamerRoot $settings.GStreamerRoot -TSDuckRoot $settings.TSDuckRoot -MsvcRuntime $settings.MsvcRuntime -TexRoot $settings.TexRoot -TexRecorder $settings.TexRecorder -AppExe (Join-Path $target 'release/tsan-gui.exe') -Version $version
+      $selected = Join-Path $out $packageName
+      Write-Output '[3/4] Build installer from this package'
+      $installerOut = New-DevelopmentOutput $settings.OutputDirectory 'installers'
+      & (Join-Path $packageScripts 'build-installer.ps1') -Package $selected -OutputDirectory $installerOut -DeployDirectory $artifacts -Compiler $settings.InnoCompiler
+      Write-Output '[4/4] Verify checksums and complete the delivery folder'
+      $completed = Complete-WindowsDeployment $artifacts $settings.DeployDirectory $version
+      Write-Output "Deploy: $completed"
+      Get-ChildItem -LiteralPath $completed -File | ForEach-Object { Write-Output "  $($_.Name)" }
     }
     'Installer' {
       if (-not $settings.InnoCompiler) { throw 'Inno Setup compiler not found. Set InnoCompiler or ISCC_EXE.' }
       $selected = Require-Package
       $out = New-DevelopmentOutput $settings.OutputDirectory 'installers'
-      & (Join-Path $packageScripts 'build-installer.ps1') -Package $selected -OutputDirectory $out -DeployDirectory $settings.DeployDirectory -Compiler $settings.InnoCompiler
+      $manifest = Get-Content -Raw -LiteralPath (Join-Path $selected 'package.toml')
+      $version = [regex]::Match($manifest, '(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"\s*$').Groups[1].Value
+      $delivery = Join-Path $settings.DeployDirectory (Get-WindowsPackageName $version)
+      & (Join-Path $packageScripts 'build-installer.ps1') -Package $selected -OutputDirectory $out -DeployDirectory $delivery -Compiler $settings.InnoCompiler
     }
     'VerifyInstallation' {
       if (-not $settings.InnoCompiler) { throw 'Inno Setup compiler not found. Set InnoCompiler or ISCC_EXE.' }
