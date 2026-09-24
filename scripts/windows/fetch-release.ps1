@@ -9,7 +9,9 @@ $candidates = @()
 $pattern = '^' + [regex]::Escape($TargetOs) + '-v(\d+\.\d+\.\d+)$'
 for ($page = 1; $page -le 20; $page++) {
   try {
-    $items = @(Invoke-RestMethod -Uri ("https://api.github.com/repos/LunaticGhoulPiano/TS-Analyzer/releases?per_page=100&page=$page") -Headers @{'User-Agent'='TS-Analyzer';'Accept'='application/vnd.github+json'} -TimeoutSec 20)
+    # Assign the JSON array first so each release is filtered and counted separately.
+    $response = Invoke-RestMethod -Uri ("https://api.github.com/repos/LunaticGhoulPiano/TS-Analyzer/releases?per_page=100&page=$page") -Headers @{'User-Agent'='TS-Analyzer';'Accept'='application/vnd.github+json'} -TimeoutSec 20
+    $items = @($response)
   } catch {
     if ($_.Exception.Response.StatusCode.value__ -eq 404) { 'NO_RELEASE'; return }
     throw

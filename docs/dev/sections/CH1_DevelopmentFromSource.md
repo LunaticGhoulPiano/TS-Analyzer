@@ -307,6 +307,7 @@ outputs/
   - tsan-platform provides shared deployment/path rules; tsan-launcher starts the Windows package. Root scripts/windows/ contains product update scripts. fetch-release.ps1 runs through PowerShell -File with separate OS, architecture, and mode arguments.
   - The shared update entry points are check_for_updates/start_check, start_download, and install_staged_update; platform-specific implementations remain behind that interface.
   - Release selection scans stable releases for the current OS and numeric version, then selects the matching mode asset. Missing assets are an error; the updater does not switch modes.
+  - Windows PowerShell returns a JSON array from Invoke-RestMethod as one pipeline object. Assign the response before converting it to the release array; wrapping the command directly in @() nests the array and breaks filtering and pagination. The fetch-release regression test preserves this HTTP response shape.
   - Installed updates run the installer against the original directory. Portable updates verify the ZIP, back up managed files, replace them, and remove obsolete managed entries while preserving user data.
   - Portable validation rejects path traversal, case collisions, symlinks/junctions, device names, data/ entries, excessive expansion, and collisions with unmanaged files.
   - A lock serializes replacement. Workers wait for the application to exit without force-killing it; replacement failures roll back the files changed by that attempt. This is not a power-loss recovery system.

@@ -52,6 +52,7 @@
   - The updater selects the asset for the current platform and distribution mode. It does not switch a portable copy into an installation.
   - Failed portable file replacement restores the previous managed files. Backups and update.log remain under the relevant updates directory; installed updates also have installer.log.
   - A source build is updated through Git and rebuilt. Older packages without deployment.toml require a manual download.
+  - Windows 0.2.2 and 0.2.3 can incorrectly report that no stable release exists because of a release-list parsing bug. To recover, manually install a corrected release (0.2.4 or later). Publishing a new release alone does not repair the updater already installed on the computer.
 
 ### Remove
 

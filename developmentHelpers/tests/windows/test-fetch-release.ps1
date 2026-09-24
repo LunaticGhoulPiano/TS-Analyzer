@@ -16,7 +16,8 @@ function Invoke-RestMethod {
     $failure | Add-Member NoteProperty Response ([pscustomobject]@{ StatusCode = [pscustomobject]@{ value__ = $fixture.HttpStatus } })
     throw $failure
   }
-  return $fixture.Pages[$page]
+  # Invoke-RestMethod emits a JSON array as one pipeline object.
+  return ,($fixture.Pages[$page])
 }
 # Keep fixture state bound to this test when the mock is called by another script.
 Set-Item Function:Invoke-RestMethod (${function:Invoke-RestMethod}.GetNewClosure())
@@ -70,6 +71,17 @@ if (($fixture.RequestedPages -join ',') -ne '1,2') { throw 'Release pagination s
 Write-Output 'PASS release pagination'
 
 $fixture.Pages = @{ 1 = @($latest) }
+foreach ($mode in @('portable','installed')) {
+  $singleAsset = $latest.assets[[int]($mode -eq 'installed')]
+  Assert-Response $mode @($latest.tag_name, $latest.html_url, $singleAsset.name, $singleAsset.browser_download_url, $singleAsset.digest, '123')
+}
+Write-Output 'PASS single-release JSON array'
+
+$fixture.Pages[1] = @($draft, $prerelease, (New-Release 'macos-v200.0.0'))
+Assert-Response 'portable' @('NO_RELEASE')
+Write-Output 'PASS no stable release for the requested platform'
+
+$fixture.Pages[1] = @($latest)
 $asset.digest = $null
 Assert-Response 'portable' @($latest.tag_name, 'NO_PACKAGE')
 $asset.digest = 'sha256:' + ('a' * 64)
