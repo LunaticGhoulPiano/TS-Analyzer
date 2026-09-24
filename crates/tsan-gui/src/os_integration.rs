@@ -37,7 +37,7 @@ fn platform_open(url: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn platform_open(url: &str) -> Result<(), String> {
     let program = if cfg!(target_os = "macos") {
         "open"
@@ -59,4 +59,9 @@ pub fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     command
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn platform_open(_: &str) -> Result<(), String> {
+    Err(tsan_platform::OperatingSystem::current().unavailable("Default browser integration"))
 }

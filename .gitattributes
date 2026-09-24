@@ -1,0 +1,2 @@
+# Preserve upstream license bytes for recorded SHA-256 values.
+/licenses/rust/** -text

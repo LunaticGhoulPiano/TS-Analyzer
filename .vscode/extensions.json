@@ -1,0 +1,11 @@
+{
+    "recommendations": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "ms-vscode.cpptools",
+        "ms-vscode.powershell",
+        "ms-vscode.hexeditor",
+        "james-yu.latex-workshop",
+        "yzhang.markdown-all-in-one"
+    ]
+}

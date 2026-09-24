@@ -10,8 +10,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-tsan-core = { path = "../tsan-core" }
-tsan-input = { path = "../tsan-input" }
+tsan-core = { workspace = true }
+tsan-input = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gstreamer.workspace = true
@@ -19,3 +19,15 @@ gstreamer-app.workspace = true
 gstreamer-video.workspace = true
 raw-window-handle.workspace = true
 windows.workspace = true
+
+[[example]]
+name = "gstreamer_smoke"
+path = "../../developmentHelpers/examples/player/gstreamer_smoke.rs"
+
+[[example]]
+name = "player_spike"
+path = "../../developmentHelpers/examples/player/player_spike.rs"
+
+[[example]]
+name = "seek_probe"
+path = "../../developmentHelpers/examples/player/seek_probe.rs"

@@ -10,9 +10,17 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = ["native-tsduck"]
+default = []
 native-tsduck = ["dep:tsan-tsduck-sys", "tsan-tsduck-sys/native"]
 
 [dependencies]
-tsan-core = { path = "../tsan-core" }
-tsan-tsduck-sys = { path = "../tsan-tsduck-sys", optional = true }
+tsan-core = { workspace = true }
+tsan-tsduck-sys = { workspace = true, optional = true }
+
+[[example]]
+name = "gop_probe"
+path = "../../developmentHelpers/examples/analyzer/gop_probe.rs"
+
+[[example]]
+name = "report"
+path = "../../developmentHelpers/examples/analyzer/report.rs"

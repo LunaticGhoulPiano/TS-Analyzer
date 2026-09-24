@@ -10,3 +10,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tsan-diagnostics.workspace = true
+tsan-analyzer.workspace = true
+
+[[example]]
+name = "pipeline_spike"
+path = "../../developmentHelpers/examples/runtime/pipeline_spike.rs"

@@ -10,11 +10,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-tsan-analyzer = { path = "../tsan-analyzer" }
-tsan-input = { path = "../tsan-input" }
-tsan-player = { path = "../tsan-player" }
+tsan-diagnostics.workspace = true
+tsan-platform.workspace = true
+tsan-runtime.workspace = true
+tsan-analyzer = { workspace = true }
+tsan-input = { workspace = true }
+tsan-player = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+tsan-analyzer = { workspace = true, features = ["native-tsduck"] }
 eframe.workspace = true
 raw-window-handle.workspace = true
 windows = { workspace = true, features = [
@@ -39,4 +43,4 @@ windows = { workspace = true, features = [
     "Win32_System_WinRT_Graphics_Direct2D",
     "Win32_UI_HiDpi",
 ] }
-windows-core = "0.62.2"
+windows-core.workspace = true

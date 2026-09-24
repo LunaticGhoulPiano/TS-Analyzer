@@ -1,0 +1,17 @@
+# Native application releases advance independently of the Rust workspace crates.
+schema = 1
+
+[windows]
+version = "0.2.1"
+status = "stable"
+minimum_os = "Windows 10 22H2 / Windows 11 (x64)"
+
+[macos]
+version = "0.0.0"
+status = "not-implemented"
+minimum_os = "Not established; native backend is pending"
+
+[linux]
+version = "0.0.0"
+status = "not-implemented"
+minimum_os = "Not established; native Wayland/X11 backend is pending"

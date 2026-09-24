@@ -14,26 +14,26 @@ impl Default for Settings {
         Self {
             theme: "Light".into(),
             opacity: 195,
-            player_backend: "d3d12".into(),
+            player_backend: if cfg!(windows) { "d3d12" } else { "auto" }.into(),
             recent_files: Vec::new(),
         }
     }
 }
 
 pub fn settings_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("TSAN_CONFIG_PATH") {
-        return Some(path.into());
-    }
-    #[cfg(target_os = "windows")]
-    let directory = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(target_os = "macos")]
-    let directory =
-        std::env::var_os("HOME").map(|p| PathBuf::from(p).join("Library/Application Support"));
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let directory = std::env::var_os("XDG_CONFIG_HOME")
+    if let Some(path) = std::env::var_os("TSAN_CONFIG_PATH")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")));
-    directory.map(|p| p.join("TS-Analyzer").join("tsan-config.toml"))
+        .filter(|p| p.is_absolute())
+    {
+        return Some(path);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Ok(Some(package)) = crate::distribution::for_gui(&exe)
+        && package.mode == crate::distribution::Mode::Portable
+    {
+        return Some(package.root.join("data/tsan-config.toml"));
+    }
+    tsan_platform::paths::config_file().ok()
 }
 
 pub fn load(path: &Path) -> Result<Settings, String> {
@@ -285,7 +285,7 @@ pub fn parse(text: &str) -> Result<Settings, String> {
     ) {
         return Err("Unknown theme".into());
     }
-    if !matches!(settings.player_backend.as_str(), "d3d11" | "d3d12") {
+    if !matches!(settings.player_backend.as_str(), "auto" | "d3d11" | "d3d12") {
         return Err("Unknown player_backend".into());
     }
     let mut unique = std::collections::BTreeSet::new();
@@ -301,17 +301,23 @@ mod tests {
     use super::*;
     #[test]
     fn paths_and_theme_round_trip_without_losing_escapes() -> Result<(), String> {
+        let directory = std::env::temp_dir().join("tsan-config-round-trip");
         let settings = Settings {
             theme: "Dark".into(),
             recent_files: vec![
-                PathBuf::from(r"C:\錄影\#1\video.ts"),
-                PathBuf::from("name\"with\ncharacters.ts"),
+                directory.join("recordings").join("#1").join("video.ts"),
+                PathBuf::from("name\\with\"escaped\ncharacters.ts"),
+                PathBuf::from("caf\u{e9}.ts"),
             ],
             ..Settings::default()
         };
         assert_eq!(parse(&encode(&settings))?, settings);
-        let literal = parse("theme = 'Light' # comment\nrecent_files = [\n 'C:\\test.ts',\n]\n")?;
-        assert_eq!(literal.recent_files, vec![PathBuf::from(r"C:\test.ts")]);
+        let literal =
+            parse("theme = 'Light' # comment\nrecent_files = [\n 'recordings\\test.ts',\n]\n")?;
+        assert_eq!(
+            literal.recent_files,
+            vec![PathBuf::from(r"recordings\test.ts")]
+        );
         assert!(parse("theme = 'Dark'\ntheme = 'Light'\n").is_err());
         assert!(parse("config_version = 2\n").is_err());
         assert!(parse("transparent_opacity = 300\n").is_err());
@@ -324,9 +330,13 @@ mod tests {
             std::env::temp_dir().join(format!("tsan-config-test-{}", std::process::id()));
         fs::create_dir_all(&directory)?;
         let path = directory.join("tsan-config.toml");
-        fs::write(directory.join("recent-files.txt"), "C:\\sample.ts\n")?;
+        let recording = directory.join("sample.ts");
+        fs::write(
+            directory.join("recent-files.txt"),
+            format!("{}\n", recording.display()),
+        )?;
         let mut settings = load(&path)?;
-        assert_eq!(settings.recent_files.len(), 1);
+        assert_eq!(settings.recent_files, vec![recording]);
         save(&path, &settings)?;
         settings.theme = "Dark".into();
         save(&path, &settings)?;

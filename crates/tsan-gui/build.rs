@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let manifest = "../../packaging/platforms.toml";
+    let manifest = "../../developmentHelpers/packaging/platforms.toml";
     println!("cargo:rerun-if-changed={manifest}");
     let target = env::var("CARGO_CFG_TARGET_OS")?;
     let text = fs::read_to_string(manifest)?;

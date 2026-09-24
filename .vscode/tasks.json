@@ -1,0 +1,307 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Windows: Check environment",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "CheckEnvironment",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Build debug",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Build",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Windows: Build release",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Build",
+        "-Profile",
+        "Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Run debug",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Run",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Run release",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Run",
+        "-Profile",
+        "Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Test workspace",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Test",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": "test"
+    },
+    {
+      "label": "Windows: CI checks",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "CI",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Generate synthetic fixtures",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "GenerateFixtures",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Build package and ZIP",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Package",
+        "-Profile",
+        "Release",
+        "-TexRecorder",
+        "${input:texRecorder}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Build Installer",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "Installer",
+        "-Profile",
+        "Release",
+        "-Package",
+        "${input:packageDirectory}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Validate development scripts",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "VerifyDevelopment",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Verify update archives",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "VerifyUpdate",
+        "-Profile",
+        "Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Verify packaged playback",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "VerifyRuntime",
+        "-Profile",
+        "Debug",
+        "-Package",
+        "${input:packageDirectory}",
+        "-Recordings",
+        "${input:recordingsDirectory}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Verify packaged reports",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "VerifyReports",
+        "-Profile",
+        "Debug",
+        "-Package",
+        "${input:packageDirectory}",
+        "-Recordings",
+        "${input:recordingsDirectory}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Windows: Verify installation lifecycle",
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/.vscode/windows/Invoke-Development.ps1",
+        "-Action",
+        "VerifyInstallation"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "texRecorder",
+      "type": "promptString",
+      "description": "XeLaTeX report .fls produced with the detected TeX installation (absolute or repository-relative path)"
+    },
+    {
+      "id": "packageDirectory",
+      "type": "promptString",
+      "description": "Unpacked TS Analyzer package directory (absolute or repository-relative path)"
+    },
+    {
+      "id": "recordingsDirectory",
+      "type": "promptString",
+      "description": "TS recordings directory for this run (absolute or repository-relative path)"
+    }
+  ]
+}

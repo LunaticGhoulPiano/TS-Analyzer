@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use tsan_analyzer::{AnalysisReport, BroadcastStandard, analyze_file_with_progress};
+use tsan_analyzer::{AnalysisReport, BroadcastStandard};
 use tsan_input::InputSourceKind;
 use tsan_player::platform::windows::{
     GpuAdapterSelection, GstreamerAdapter, PlayerBackendKind, WindowsVideoHost,
@@ -174,6 +174,7 @@ enum PlayerControlIcon {
 }
 
 pub struct TsanApp {
+    analysis: tsan_runtime::AnalysisService,
     page: Page,
     analyzer_view: AnalyzerView,
     player_view: PlayerView,
@@ -194,8 +195,8 @@ pub struct TsanApp {
     export_receiver: Option<Receiver<Result<PathBuf, String>>>,
     update_status: Option<update::UpdateStatus>,
     update_receiver: Option<Receiver<update::UpdateStatus>>,
-    update_download: Option<Receiver<Result<PathBuf, String>>>,
-    staged_update: Option<PathBuf>,
+    update_download: Option<Receiver<Result<update::StagedUpdate, String>>>,
+    staged_update: Option<update::StagedUpdate>,
     theme: AppTheme,
     glass_settings: liquid_glass::Settings,
     desktop_capture: Option<DesktopCapture>,
@@ -288,7 +289,11 @@ impl TsanApp {
         }
     }
 
-    pub fn new(context: &eframe::CreationContext<'_>, initial_input: Option<PathBuf>) -> Self {
+    pub fn new(
+        context: &eframe::CreationContext<'_>,
+        initial_input: Option<PathBuf>,
+        analysis: tsan_runtime::AnalysisService,
+    ) -> Self {
         let settings_path = crate::config::settings_path();
         let loaded = settings_path
             .as_deref()
@@ -319,6 +324,7 @@ impl TsanApp {
         };
 
         let mut app = Self {
+            analysis,
             page: Page::Analyzer,
             analyzer_view: AnalyzerView::Overview,
             player_view: PlayerView::PlayTs,
@@ -376,6 +382,11 @@ impl TsanApp {
             last_worker_log_sequence: 0,
         };
         app.record_log(LogLevel::Info, LogCategory::System, "TS Analyzer started");
+        app.record_log(
+            LogLevel::Info,
+            LogCategory::System,
+            tsan_diagnostics::status(),
+        );
         app.record_log(
             LogLevel::Info,
             LogCategory::Analysis,
@@ -521,18 +532,20 @@ impl TsanApp {
             let path = self.documents[index].path.clone();
             let progress = self.documents[index].progress.clone();
             let cancelled = self.documents[index].cancelled.clone();
+            let analysis = self.analysis;
             self.documents[index].analysis_started = Some(Instant::now());
             match thread::Builder::new()
                 .name("tsan-analyzer-worker".to_owned())
                 .spawn(move || {
-                    let result = analyze_file_with_progress(&path, |read, total| {
-                        progress.store(
-                            (read.saturating_mul(1000) / total.max(1)) as u32,
-                            Ordering::Relaxed,
-                        );
-                        !cancelled.load(Ordering::Relaxed)
-                    })
-                    .map_err(|error| error.to_string());
+                    let result = analysis
+                        .analyze_with_progress(&path, |read, total| {
+                            progress.store(
+                                (read.saturating_mul(1000) / total.max(1)) as u32,
+                                Ordering::Relaxed,
+                            );
+                            !cancelled.load(Ordering::Relaxed)
+                        })
+                        .map_err(|error| error.to_string());
                     let _ = sender.send(result);
                 }) {
                 Ok(_worker) => self.documents[index].receiver = Some(receiver),
@@ -626,6 +639,7 @@ impl TsanApp {
             {
                 self.last_worker_log_sequence = self.last_worker_log_sequence.max(entry.sequence);
                 self.log_entries.push(entry.clone());
+                self.trim_log();
             }
             if self.player_requested_input.is_some()
                 && snapshot.input != self.player_requested_input
@@ -648,6 +662,14 @@ impl TsanApp {
             message,
         ));
         self.next_log_sequence = self.next_log_sequence.saturating_add(1);
+        self.trim_log();
+    }
+
+    fn trim_log(&mut self) {
+        let excess = self.log_entries.len().saturating_sub(4096);
+        if excess > 0 {
+            self.log_entries.drain(..excess);
+        }
     }
 
     fn set_local_error(&mut self, category: LogCategory, message: impl Into<String>) {
@@ -2711,6 +2733,7 @@ PCR PID: {}
             }
         });
         ui.add_space(8.0);
+        ui.label(format!("Diagnostics: {}", tsan_diagnostics::status()));
         ui.label(
             "Categories: System, Input, Playback, Pipeline, Analysis, Configuration, Import/Export",
         );
@@ -3046,7 +3069,7 @@ impl eframe::App for TsanApp {
         egui::CentralPanel::default().show(root_ui, |ui| {
             if self.theme == AppTheme::LiquidGlass
                 && self.desktop_capture.as_ref().is_some_and(DesktopCapture::is_frozen) {
-                help_text(ui, "Glass background frozen — screenshots enabled. Resume live mode in Theme > Glass settings.");
+                help_text(ui, "Glass background frozen — screenshots enabled. Resume live mode in Theme > Liquid Glass (experimental).");
             }
             if self.theme == AppTheme::LiquidGlass && background.is_none() {
                 help_text(ui, "Waiting for desktop capture. Keep the window fully on one display.");
@@ -3837,7 +3860,7 @@ mod glass_window_tests {
                 ..Default::default()
             },
             Box::new(move |context| {
-                let mut app = TsanApp::new(context, None);
+                let mut app = TsanApp::new(context, None, tsan_runtime::AnalysisService);
                 app.theme = AppTheme::LiquidGlass;
                 apply_theme(
                     &context.egui_ctx,

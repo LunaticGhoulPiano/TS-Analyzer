@@ -2,7 +2,6 @@
 /target/
 **/*.rs.bk
 
-
 # Local runtime output
 /captures/
 /recordings/
@@ -22,9 +21,8 @@ Desktop.ini
 .idea/
 
 # Large or non-redistributable development test streams
-/dev_tests_data/inputs/local/
+/developmentHelpers/test-data/inputs/local/
 
-# temps
-Implementations.md
-temp.md
-GeminiAdvice.md
+# Machine-specific development settings and generated artifacts
+/developmentHelpers/config/*.local.psd1
+/developmentHelpers/outputs/

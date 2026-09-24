@@ -8,6 +8,9 @@ members = [
     "crates/tsan-player",
     "crates/tsan-cli",
     "crates/tsan-gui",
+    "crates/tsan-platform",
+    "crates/tsan-diagnostics",
+    "crates/tsan-launcher",
 ]
 resolver = "3"
 
@@ -19,6 +22,15 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+tsan-core = { path = "crates/tsan-core" }
+tsan-input = { path = "crates/tsan-input" }
+tsan-analyzer = { path = "crates/tsan-analyzer", default-features = false }
+tsan-tsduck-sys = { path = "crates/tsan-tsduck-sys" }
+tsan-runtime = { path = "crates/tsan-runtime" }
+tsan-player = { path = "crates/tsan-player" }
+tsan-platform = { path = "crates/tsan-platform" }
+tsan-diagnostics = { path = "crates/tsan-diagnostics" }
+windows-core = "0.62.2"
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "wgpu"] }
 gstreamer = "0.25"
 gstreamer-app = "0.25"
@@ -55,3 +67,8 @@ opt-level = 2
 
 [profile.dev.package.tsan-tsduck-sys]
 opt-level = 2
+
+# Keep matching PDBs outside user packages for crash symbolication.
+[profile.release]
+debug = 1
+strip = "none"

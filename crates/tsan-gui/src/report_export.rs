@@ -98,10 +98,12 @@ fn xelatex_command() -> Result<Command, String> {
     }
     let mut runtime_id = std::hash::DefaultHasher::new();
     root.hash(&mut runtime_id);
-    let cache = std::env::var_os("LOCALAPPDATA")
+    let cache = std::env::var_os("TSAN_CACHE_ROOT")
         .map(PathBuf::from)
-        .ok_or("LOCALAPPDATA is unavailable")?
-        .join("TS-Analyzer/cache/tex")
+        .filter(|p| p.is_absolute())
+        .or_else(|| tsan_platform::paths::cache_directory().ok())
+        .ok_or("Application cache location is unavailable")?
+        .join("tex")
         .join(format!("{:016x}", runtime_id.finish()));
     fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let mut command = crate::os_integration::background_command(executable);
@@ -120,10 +122,10 @@ fn xelatex_command() -> Result<Command, String> {
             command.env(name, value);
         }
     }
-    let windows = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .ok_or("SystemRoot is unavailable")?;
+    let windows = tsan_platform::paths::windows_directory()?;
     command
+        .env("SystemRoot", &windows)
+        .env("WINDIR", &windows)
         .env(
             "PATH",
             std::env::join_paths([root.join("bin/windows"), windows.join("System32")])

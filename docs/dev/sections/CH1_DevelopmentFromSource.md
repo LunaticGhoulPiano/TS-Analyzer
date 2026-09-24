@@ -1,0 +1,357 @@
+# CH1 — Development from Source
+
+## Windows
+
+### Required tools
+
+  - Target: Windows 10 22H2 / Windows 11 x64. Compatibility must still be checked on the intended OS, GPU, and driver.
+  - [Git](https://git-scm.com/downloads) to obtain the repository and the pinned Git dependency.
+  - [Rustup](https://rustup.rs/), with the version and components in [rust-toolchain.toml](../../../rust-toolchain.toml). The current pin is Rust 1.97.1, rustfmt, and clippy. Use the x86_64-pc-windows-msvc toolchain on Windows; the repository does not force a Windows target on other hosts.
+  - [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/): Desktop development with C++, the MSVC x64 tools, and a Windows SDK. The TSDuck bridge uses C++20.
+  - [GStreamer](https://gstreamer.freedesktop.org/download/): MSVC x64 runtime and development files, at least 1.28. Keep their versions aligned; do not substitute MinGW packages. The development environment must provide pkg-config.exe and gstreamer-1.0.pc.
+  - [TSDuck](https://tsduck.io/): x64 SDK with headers under include/, import libraries under lib/Release-Win64/, and tscore.dll/tsduck.dll under bin/.
+  - [PowerShell 7](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows) for development tasks. Product update scripts use the Windows-provided PowerShell 5.1.
+  - [VS Code](https://code.visualstudio.com/) is optional. The repository tasks work through PowerShell without the editor; rust-analyzer and the C/C++ extension provide editor assistance.
+  - For PDF export from source and runtime packaging: [TeX Live](https://www.tug.org/texlive/) with XeLaTeX and the generated report's macro/font dependencies.
+  - For an installer EXE: [Inno Setup](https://jrsoftware.org/isdl.php), providing ISCC.exe. It is a packaging compiler, not a Rust dependency or an end-user requirement.
+  - Optional dependency-policy check: cargo-deny using developmentHelpers/config/deny.toml. It is not installed by the task entry point.
+
+  - Install prerequisites deliberately. Tasks do not install tools, download missing Cargo dependencies, or change system environment variables.
+  - The package contains only the required GStreamer/TSDuck/MSVC/XeLaTeX runtime files and licenses, not the SDKs, Rust compiler, or full TeX installation.
+
+### 1. Obtain the source and prepare dependencies
+
+  - Run the following in PowerShell. After cloning, all commands in this chapter assume the repository root unless a block explicitly changes directory.
+
+~~~powershell
+git clone https://github.com/LunaticGhoulPiano/TS-Analyzer.git
+Set-Location TS-Analyzer
+rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
+cargo fetch --locked
+~~~
+
+  - Use the pin from rust-toolchain.toml if it has changed. The explicit setup commands may download the toolchain and Cargo dependencies.
+  - Subsequent development tasks use --locked --offline. If Cargo.lock changes, run cargo fetch --locked again before the offline tasks.
+  - Cargo.toml centralizes internal crate paths and shared external dependencies. It also contains native feature choices, development optimization, and the pinned winit Git override. Cargo.lock records the resolved dependency versions.
+
+### 2. Check tool paths and optional local configuration
+
+~~~powershell
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action CheckEnvironment
+~~~
+
+  - CheckEnvironment prints discovered tool locations and whether they exist. It does not install or repair tools, or prove that a complete build will succeed.
+  - Discovery uses environment variables, PATH, standard installation locations, and vswhere where applicable.
+  - If a tool is not found or a different installation is needed, create the ignored local configuration and edit its values:
+
+~~~powershell
+if (-not (Test-Path -LiteralPath developmentHelpers/config/windows.local.psd1)) {
+    Copy-Item -LiteralPath developmentHelpers/config/windows.example.psd1 -Destination developmentHelpers/config/windows.local.psd1
+}
+~~~
+
+| Setting in windows.local.psd1 | Environment override | Purpose |
+| --- | --- | --- |
+| GStreamerRoot | GSTREAMER_1_0_ROOT_MSVC_X86_64 | MSVC x64 SDK root. |
+| TSDuckRoot | TSDUCK_HOME | TSDuck SDK root. |
+| TexRoot | TSAN_DEV_TEX_ROOT | TeX Live root containing bin/windows/xelatex.exe. |
+| MsvcRuntime | TSAN_DEV_MSVC_RUNTIME | x64 MSVC CRT directory; Package can locate it through vswhere. |
+| MsvcLicenses | TSAN_DEV_MSVC_LICENSES | License directory for that runtime; discovered from its installation root or supplied for a relocated SDK. |
+| InnoCompiler | ISCC_EXE | ISCC.exe file. |
+| TexRecorder | TSAN_DEV_TEX_RECORDER | Complete representative report's .fls from the selected TeX installation. |
+| Recordings | TSAN_TEST_RECORDINGS | Local TS directory; defaults to developmentHelpers/test-data/inputs/local. |
+| OutputDirectory | TSAN_DEV_OUTPUT | Intermediate files, logs and developer state; defaults to developmentHelpers/outputs/windows. |
+| DeployDirectory | TSAN_DEV_DEPLOY | User ZIP, installer and checksums; defaults to developmentHelpers/outputs/deploy/windows. |
+| Package | — | Existing unpacked package used by Installer and package verification. |
+
+  - Empty tool settings enable automatic discovery. Relative paths resolve from the repository root; absolute paths can be supplied locally.
+  - Precedence is a command-line argument where offered, then its environment override, local configuration, and finally discovery/defaults.
+  - Use -Configuration to select another .psd1 file. An explicitly selected missing file is an error.
+  - Do not commit machine-specific SDK paths. The scripts do not create a local configuration or persist prompted inputs automatically.
+
+### Configuration locations
+
+| File or location | Purpose |
+| --- | --- |
+| [Cargo.toml](../../../Cargo.toml) and crates/*/Cargo.toml | Workspace, dependencies, features, build profiles, and registered examples/tests. |
+| [Cargo.lock](../../../Cargo.lock) | Locked Rust dependency versions. |
+| [rust-toolchain.toml](../../../rust-toolchain.toml) | Rust version and components; the native host target is selected by rustup. |
+| [.vscode/tasks.json](../../../.vscode/tasks.json) | Task labels, arguments, and interactive path inputs. |
+| [.vscode/extensions.json](../../../.vscode/extensions.json) | Workspace extension recommendations; does not install extensions automatically. |
+| [.vscode/windows/Invoke-Development.ps1](../../../.vscode/windows/Invoke-Development.ps1) | Editor adapter for the shared development entry point. |
+| [.vscode/c_cpp_properties.json](../../../.vscode/c_cpp_properties.json) | C++20/TSDuck IntelliSense; uses workspace/environment variables. It does not configure Cargo builds. |
+| [developmentHelpers/config/windows.example.psd1](../../../developmentHelpers/config/windows.example.psd1) | Portable configuration template. |
+| developmentHelpers/config/windows.local.psd1 | Optional ignored machine overrides. |
+| [developmentHelpers/config/deny.toml](../../../developmentHelpers/config/deny.toml) | cargo-deny license/dependency policy. |
+| [developmentHelpers/packaging/platforms.toml](../../../developmentHelpers/packaging/platforms.toml) | Independent platform versions, status, and minimum OS. |
+| [developmentHelpers/packaging/windows/ts-analyzer.iss](../../../developmentHelpers/packaging/windows/ts-analyzer.iss) | Inno identity, install scope, file rules, and shortcuts. |
+| [developmentHelpers/test-data/inputs/manifest.toml](../../../developmentHelpers/test-data/inputs/manifest.toml) and expected/ | Test input identity and expected-data records. |
+| developmentHelpers/outputs/windows/state/tsan-config.toml | GUI settings when launched through the Run task. |
+| developmentHelpers/outputs/windows/diagnostics/ | Automatic diagnostic sessions when launched through Run. TSAN_DIAGNOSTICS_DIR overrides the application directory; Run sets it to OutputDirectory/diagnostics for its child process. |
+| Application tsan-config.toml | User preferences; locations are listed below. |
+| Package deployment.toml / package.toml / build-info.toml / SHA256SUMS | Generated deployment mode, runtime/build identity, and file integrity inventory. |
+
+  - There is no repository .cargo/config.toml redirecting the build. Cargo uses target/ by default; CARGO_TARGET_DIR and external Cargo configuration still apply.
+  - The Windows tasks temporarily set PATH, PKG_CONFIG_PATH, and TSDUCK_HOME, then restore the caller's environment.
+  - A task does not configure IntelliSense in an already-running editor. A nonstandard TSDuck installation may need TSDUCK_HOME in the environment used to start VS Code.
+
+### 3. Build, run, and check
+
+~~~powershell
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Build -Profile Debug
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Run -Profile Debug
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action CI
+~~~
+
+  - Close the application before continuing from Run.
+  - CI checks formatting, development scripts/tasks, locked Rust license collection, workspace tests (including isolated panic/native crash recovery), update-archive rejection cases, release selection, and portable replacement/rollback. It does not build an installer, publish a release, or run ignored GPU/window/recording tests.
+  - The same entry works in a configured Windows CI runner. No repository GitHub auto-publish workflow is currently provided.
+  - Direct Cargo use remains available. Prepare the current PowerShell process's native SDK paths first:
+
+~~~powershell
+. ./developmentHelpers/scripts/windows/environment.ps1
+$devSettings = Get-DevelopmentConfiguration (Get-Location).Path
+Enable-DevelopmentEnvironment $devSettings
+cargo run --locked -p tsan-gui
+~~~
+
+  - Direct cargo run uses the application's normal configuration and diagnostics locations. Run instead sets TSAN_CONFIG_PATH to the development state directory and TSAN_DIAGNOSTICS_DIR to OutputDirectory/diagnostics.
+  - For optional cargo-deny checks, after installing that tool explicitly:
+
+~~~powershell
+cargo deny --config developmentHelpers/config/deny.toml check
+~~~
+
+### VS Code extensions
+
+  - Open the root workspace to see the recommendations in .vscode/extensions.json. These are editor aids, not application runtime dependencies; the file does not install tools or extensions.
+
+| Extension | Project use |
+| --- | --- |
+| rust-lang.rust-analyzer | Rust navigation, diagnostics, completion, and test discovery. |
+| tamasfe.even-better-toml | Cargo manifests, platform versions, and configuration TOML. |
+| ms-vscode.cpptools | Native C++ TSDuck bridge and Windows debugger integration. |
+| ms-vscode.powershell | Windows build, packaging, validation, and update scripts. |
+| ms-vscode.hexeditor | Inspect transport-stream packet bytes. |
+| james-yu.latex-workshop | Edit and inspect generated report LaTeX; compiling requires a configured TeX engine. |
+| yzhang.markdown-all-in-one | Maintain user/developer Markdown documentation. |
+
+### VS Code tasks and outputs
+
+  - Open the repository root as the workspace. Terminal → Run Task lists the Windows tasks; Ctrl+Shift+B runs Windows: Build debug.
+  - .vscode/tasks.json calls the adapter under .vscode/windows/, which forwards to developmentHelpers/scripts/windows/Invoke-Development.ps1. A tasks.json placed only inside a subdirectory is not automatically loaded.
+  - Package prompts for a .fls file; Installer prompts for an unpacked package; package tests also prompt for recordings. These inputs are not saved automatically.
+  - outputs/ is ignored as a whole. Generated directories are created when a task needs them; .gitkeep files are not used there. The macOS/Linux delivery paths reserve the future layout, not tracked empty folders.
+  - Each packaging/test run uses a new UTC yyyyMMdd-HHmmss-fff-PID directory under OutputDirectory. Deliverables go to DeployDirectory; existing versioned ZIPs/installers are never overwritten.
+
+| VS Code task | Action | Output |
+| --- | --- | --- |
+| Windows: Check environment | CheckEnvironment | Tool locations in the terminal. |
+| Windows: Build debug / Build release | Build -Profile Debug / Release | Cargo target/debug or target/release. |
+| Windows: Run debug / Run release | Run -Profile Debug / Release | Cargo binary, OutputDirectory/state/tsan-config.toml, and OutputDirectory/diagnostics/session-*/. |
+| Windows: Test workspace | Test | Cargo test results; individual tests may use OS temporary directories. |
+| Windows: CI checks | CI | Terminal results, license-tests/<run-id>, update-tests/<run-id>, portable-update-tests/<run-id>, and developmentHelpers/outputs/windows/diagnostics-tests/<run-id>. |
+| Windows: Generate synthetic fixtures | GenerateFixtures | developmentHelpers/test-data/inputs/synthetic/transport_detect_packet_size_188.ts. |
+| Windows: Build package and ZIP | Package | Assembly and symbols in OutputDirectory/packages/<run-id>; ZIP and checksum in DeployDirectory. |
+| Windows: Build Installer | Installer | ISS, marker and log in OutputDirectory/installers/<run-id>; EXE and checksum in DeployDirectory. |
+| Windows: Validate development scripts | VerifyDevelopment | Terminal validation results. |
+| Windows: Verify update archives | VerifyUpdate | OutputDirectory/update-tests and portable-update-tests. |
+| Windows: Verify installation lifecycle | VerifyInstallation | OutputDirectory/installation-tests/<run-id>. |
+| Windows: Verify packaged playback | VerifyRuntime | OutputDirectory/runtime-tests/<run-id>. |
+| Windows: Verify packaged reports | VerifyReports | OutputDirectory/report-tests/<run-id>. |
+
+  - GenerateFixtures verifies existing matching content and refuses to overwrite different fixture bytes.
+  - VerifyInstallation uses an isolated AppId, install directory, shortcuts, and fixture releases. It tests install, upgrade, background update, uninstall, and user-data retention, then cleans up its test registration.
+  - VerifyRuntime decodes recordings to fakesink; it does not validate visible playback or seeking.
+  - VerifyReports exercises the packaged native runtime and CBOR/XLSX/TeX/PDF export. It needs compatible runtime/GPU components.
+  - Terminal output is not universally saved to disk. Dedicated runtime/report/installer/update tests retain their own results and logs.
+
+### 4. Prepare the private PDF runtime
+
+  - Packaging copies the XeLaTeX input closure from a representative complete report's .fls file, together with required engine/font support files and licenses.
+  - The recorder must come from the same TeX Live installation selected by TexRoot, not from a previously bundled runtime.
+  - From the source-built GUI, export a complete LaTeX report including the relevant analysis pages and chart types. Then run these commands from the repository root:
+
+~~~powershell
+. ./developmentHelpers/scripts/windows/environment.ps1
+$devSettings = Get-DevelopmentConfiguration (Get-Location).Path
+$texSource = (Resolve-Path -LiteralPath (Read-Host 'Path to the exported report.tex')).Path
+$texDirectory = Split-Path -Parent $texSource
+$pdfBuild = Join-Path $texDirectory 'build'
+New-Item -ItemType Directory -Force -Path $pdfBuild | Out-Null
+$xelatex = Join-Path $devSettings.TexRoot 'bin/windows/xelatex.exe'
+Push-Location -LiteralPath $texDirectory
+try {
+    1..2 | ForEach-Object {
+        & $xelatex -interaction=nonstopmode -halt-on-error -no-shell-escape -recorder "-output-directory=$pdfBuild" $texSource
+        if ($LASTEXITCODE -ne 0) { throw 'Report compilation failed; inspect the build log.' }
+    }
+} finally {
+    Pop-Location
+}
+$recorderPath = Join-Path $pdfBuild ([IO.Path]::GetFileNameWithoutExtension($texSource) + '.fls')
+~~~
+
+  - Recreate the recorder when the report template or its dependencies change, then re-run package report verification. A recorder from an incomplete report can omit needed files.
+  - This subset is for application reports; it is not a general-purpose TeX distribution.
+
+### 5. Development workflow: source changes to deploy
+
+  1. Edit the source. For an application release, also change version under [windows] in developmentHelpers/packaging/platforms.toml, for example 0.2.1 to 0.2.2. Changing the Cargo workspace crate version alone does not advance the Windows application release. Keep the installer AppId unchanged.
+  2. During development, use Windows: Run debug to rebuild changed code and run the GUI. Close the GUI before packaging. Windows: Build debug compiles without running; Windows: Build release produces optimized Cargo binaries only.
+  3. Run Windows: CI checks. Fix failures before producing deliverables. CI checks formatting, scripts, locked Rust license collection, workspace tests, and the existing automated update fixtures; it does not publish anything.
+  4. Run Windows: Build package and ZIP. Enter the path to the complete .fls recorder prepared in section 4. For a code-only or version-only change, the existing recorder can be reused if the report template, dependencies, and selected TeX installation have not changed.
+  5. Wait for Package to finish and copy the directory from its Package: output. It is the unpacked TS-Analyzer-windows-v<version>-x86_64 directory under outputs/windows/packages/<run-id>/.
+  6. Run Windows: Build Installer and provide that exact unpacked package directory. Do not provide the ZIP filename, target/release, or an older package. Installer packages that directory; it does not recompile the Rust application.
+  7. The four versioned delivery files now appear directly under developmentHelpers/outputs/deploy/windows/. Preserve the matching symbols/ directory from the package run for debugging that release.
+  8. Record the source changes with a Conventional Commit and push the corresponding commit. When publishing, create the GitHub release tag windows-v<version> against that commit and attach the ZIP, setup EXE, and both .sha256 files. The VS Code tasks do not run Git commands or upload release assets.
+
+| Stage | Task to select in Terminal → Run Task | Input and result |
+| --- | --- | --- |
+| Local development | Windows: Run debug | Recompiles changed code, then opens the GUI. |
+| Pre-delivery checks | Windows: CI checks | Produces terminal results and development test outputs. |
+| Compile and assemble portable delivery | Windows: Build package and ZIP | Prompts for .fls; rebuilds the release GUI and launcher, collects private runtimes/licenses, writes the ZIP and checksum. |
+| Build installed delivery | Windows: Build Installer | Prompts for the new unpacked package; writes the setup EXE and checksum. |
+
+  - Even a one-line version change requires Package again, then Installer against the newly printed package directory. Cargo recompiles affected targets incrementally; packaging assembles the complete user delivery again.
+  - A separate Windows: Build release task is not required before Package because Package already compiles the release application. Build alone does not refresh deploy/.
+  - Installer reads the version from the chosen package.toml. A stale package path therefore produces a stale installer even if platforms.toml has been edited.
+  - Existing same-version delivery filenames cause an error. Use a new version for a new published release; unpublished local artifacts can be deliberately removed before rebuilding that same version. There is no automatic overwrite or archive directory.
+
+  - Equivalent PowerShell commands from the repository root, after saving the source and version edits:
+
+~~~powershell
+# Optional local development run; close the GUI before continuing.
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Run -Profile Debug
+
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action CI
+
+$recorderPath = Read-Host 'Path to the complete report.fls from the configured TeX installation'
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Package -TexRecorder $recorderPath
+
+$packagePath = Read-Host 'New unpacked directory printed after Package:'
+pwsh -NoProfile -File .vscode/windows/Invoke-Development.ps1 -Action Installer -Package $packagePath
+~~~
+
+  - Stop on a failed task and inspect its output before continuing.
+  - Package first builds the release GUI, resolves Cargo's target_directory, assembles the private runtime, builds tsan-launcher through Cargo with a static CRT, and checks its platform/version identity.
+  - Installer compiles the formal Inno Setup EXE. The generated ISS uses relocatable source paths; cross-drive source locations are supplied to that invocation rather than saved as machine-specific paths.
+  - Release builds retain line-level debug information. Packaging requires tsan_gui.pdb and tsan_launcher.pdb, copies them into symbols/, and records executable/PDB SHA-256 values plus the platform version in symbols/manifest.json. Preserve the matching symbols for each release to inspect crash.dmp in a Windows debugger.
+  - symbols/ is a development artifact outside the user ZIP. docs/usr/ is included; docs/dev/, developmentHelpers/, .vscode/, SDKs, and compilers are excluded.
+
+~~~text
+developmentHelpers/outputs/windows/
+    state/tsan-config.toml
+    packages/<run-id>/
+        TS-Analyzer-windows-v<version>-x86_64/
+            TS-Analyzer.exe
+            deployment.toml
+            app/
+            runtime/
+            scripts/windows/fetch-release.ps1
+            docs/usr/outlines.md
+            docs/usr/sections/CH*.md
+            licenses/
+            package.toml
+            build-info.toml
+            README.txt
+            SHA256SUMS
+        symbols/
+    installers/<run-id>/
+        installer.iss
+        installed.toml
+        compiler.log
+    license-tests/<run-id>/             # collected licenses and regression fixtures
+    update-tests/<run-id>/
+    portable-update-tests/<run-id>/
+    installation-tests/<run-id>/
+    runtime-tests/<run-id>/             # probe/decode logs, registry, results.json
+    report-tests/<run-id>/              # results.json and reports per recording
+developmentHelpers/outputs/deploy/
+    windows/
+        TS-Analyzer-windows-v<version>-x86_64-portable.zip
+        TS-Analyzer-windows-v<version>-x86_64-portable.zip.sha256
+        TS-Analyzer-windows-v<version>-x86_64-setup.exe
+        TS-Analyzer-windows-v<version>-x86_64-setup.exe.sha256
+    macos/                             # Reserved; packaging not implemented
+    linux/                             # Reserved; packaging not implemented
+~~~
+
+### Third-party license collection
+
+  - The project license remains at the repository root as LICENSE. Maintained third-party notices live under licenses/: liquid-glass-notices.txt and rust/<crate>-<version>/.
+  - licenses/rust/sources.json records each supplemental notice's crate version, Cargo source, SPDX metadata, exact upstream revision/URL, and SHA-256. These supplements fill omissions in the published crate contents, including the four embedded font notices. Preserve the original upstream text; .gitattributes disables line-ending conversion for these files.
+  - Packaging collects ordinary and nested notices from the locked Cargo packages, adds the exact-version supplements, and writes licenses/rust-dependencies.json plus the selected sources.json into the package. No network download is performed during collection.
+  - Missing/empty license text, a mismatched supplement checksum, or changed source/SPDX metadata fails packaging. On dependency upgrades, review the new upstream revision and update any required supplement files and sources.json; do not reuse an older version's entry automatically.
+  - Windows: CI checks runs test-rust-licenses.ps1 against the current Windows dependency inventory and exercises rejection cases. Its license files and fixtures stay under outputs/windows/license-tests/<run-id>/.
+  - Native GStreamer, TSDuck, MSVC, and TeX notices are collected from the selected runtime installations into the assembled package's licenses/ directory. They are not replaced with the Rust supplements or the project's own LICENSE.
+  - Both the portable ZIP and the installer include the assembled licenses/ directory. Rebuild Package, then Installer, to include changed notices in a new delivery.
+
+### Versions, installation identity, and updates
+
+  - Cargo crate versions and platform release versions are separate. Change the intended OS entry in platforms.toml; do not advance another platform's version as a side effect.
+  - GUI identity, package metadata, asset names, and the windows-vVERSION release tag must agree. Published artifacts must not be silently replaced with different contents.
+  - The Windows installer keeps AppId=TSAnalyzer, a current-user install scope, UsePreviousAppDir=yes, and the same shortcut/uninstall identity. The install path is not versioned.
+  - deployment.toml alongside the package identifies installed or portable mode. Source builds without a marker cannot use automatic package replacement.
+  - tsan-platform provides shared deployment/path rules; tsan-launcher starts the Windows package. Root scripts/windows/ contains product update scripts. fetch-release.ps1 runs through PowerShell -File with separate OS, architecture, and mode arguments.
+  - The shared update entry points are check_for_updates/start_check, start_download, and install_staged_update; platform-specific implementations remain behind that interface.
+  - Release selection scans stable releases for the current OS and numeric version, then selects the matching mode asset. Missing assets are an error; the updater does not switch modes.
+  - Installed updates run the installer against the original directory. Portable updates verify the ZIP, back up managed files, replace them, and remove obsolete managed entries while preserving user data.
+  - Portable validation rejects path traversal, case collisions, symlinks/junctions, device names, data/ entries, excessive expansion, and collisions with unmanaged files.
+  - A lock serializes replacement. Workers wait for the application to exit without force-killing it; replacement failures roll back the files changed by that attempt. This is not a power-loss recovery system.
+  - SHA-256 checks integrity. Authenticode signing is not configured. Full GitHub end-to-end updating must be verified with two actual published releases in addition to local fixture tests.
+  - Installer output separation can be checked without installing anything:
+
+~~~powershell
+. ./developmentHelpers/scripts/windows/environment.ps1
+$devSettings = Get-DevelopmentConfiguration (Get-Location).Path
+$testOutput = Join-Path $devSettings.OutputDirectory ("installer-build-tests/" + [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss-fff"))
+& ./developmentHelpers/tests/windows/test-installer-build.ps1 -Compiler $devSettings.InnoCompiler -OutputDirectory $testOutput
+~~~
+
+  - This test compiles non-executable fixtures under outputs/, checks the installer/checksum and working files, and never launches the installer. Its output is not for distribution.
+  - The tasks neither commit nor publish. Upload only the ZIP/setup EXE and checksums from developmentHelpers/outputs/deploy/windows/. The assembled package directory under outputs/ is an input for Installer and package tests.
+  - Deliverables are written directly to developmentHelpers/outputs/deploy/windows/ with versioned filenames. No historical archive directory is maintained. Timestamped build, test, and symbol directories remain under outputs/windows/.
+  - developmentHelpers/ contains maintained build inputs as well as tooling. In particular, GUI build.rs reads packaging/platforms.toml; do not delete the whole helper tree as a cache.
+
+| Data | Installed or direct source build | Portable |
+| --- | --- | --- |
+| Settings | %APPDATA%/TS-Analyzer/tsan-config.toml | Package/data/tsan-config.toml |
+| Runtime cache | %LOCALAPPDATA%/TS-Analyzer/cache | Package/data/cache |
+| Update staging/logs | %LOCALAPPDATA%/TS-Analyzer/updates | Package/data/updates |
+| Automatic diagnostics | %LOCALAPPDATA%/TS-Analyzer/diagnostics | Package/data/diagnostics |
+| Reports and exported logs | Save-dialog destination | Save-dialog destination |
+
+  - An absolute TSAN_CONFIG_PATH explicitly overrides settings; empty or relative overrides fall back to the normal platform location. The Run task uses it for development state. The launcher scopes TSAN_CACHE_ROOT and TSAN_TEX_ROOT to its private runtime.
+  - Uninstall preserves AppData and user-owned recordings/reports. Portable removal also removes data/ if the entire directory is deleted.
+  - target/ can be deleted with builds and the application stopped; Cargo reconstructs it.
+  - developmentHelpers/outputs/ can be deleted after retaining any needed delivery ZIPs/installers under deploy/, assembled packages, logs, recorder files, or development settings. Tasks recreate outputs, but deleted state and historical validation results are not recovered.
+  - Do not delete developmentHelpers/test-data/expected/, maintained synthetic fixtures, scripts, or configuration templates as if they were build output.
+
+## macOS
+
+  - Shared diagnostics use ~/Library/Logs/TS-Analyzer/; TSAN_DIAGNOSTICS_DIR can supply an absolute override. Logging and Rust panic capture are shared; native crash dump collection is explicitly unimplemented.
+
+  - The OS dispatcher selects MacosFrontend and returns a macOS-specific not-implemented error with a nonzero exit code. It receives the same AnalysisService contract as Windows.
+  - Shared Rust development uses the pinned Rust toolchain and Cargo. Run cargo test --locked -p tsan-core -p tsan-input -p tsan-runtime -p tsan-platform. No Windows SDK is needed for these targets.
+  - Native TSDuck integration is opt-in outside the Windows GUI: --features tsan-analyzer/native-tsduck requires a TSDuck SDK for the Cargo target via TSDUCK_HOME. Cross-builds do not discover a host SDK as a substitute.
+  - Future delivery artifacts belong in developmentHelpers/outputs/deploy/macos/. Build/test intermediates belong in developmentHelpers/outputs/macos/.
+
+  - The native GUI, playback integration, package build, and updater are not implemented. There is no supported full-application build/release sequence yet.
+  - Platform status/version remains independently recorded under [macos] in platforms.toml.
+  - Shared Rust modules can be worked on separately; that does not establish native application compatibility. Windows PowerShell tasks, MSVC SDKs, and Inno installers are not macOS tooling.
+  - Native prerequisites, deployment target, signing/notarization, runtime packaging, and update verification must be documented when that backend is implemented.
+
+## Linux
+
+  - Shared diagnostics use $XDG_STATE_HOME/TS-Analyzer/diagnostics/ or ~/.local/state/TS-Analyzer/diagnostics/; TSAN_DIAGNOSTICS_DIR can supply an absolute override. Native crash dump collection is explicitly unimplemented.
+
+  - The OS dispatcher selects LinuxFrontend and returns a Linux-specific not-implemented error with a nonzero exit code. It receives the same AnalysisService contract as Windows.
+  - Shared Rust development uses the pinned Rust toolchain and Cargo. Run cargo test --locked -p tsan-core -p tsan-input -p tsan-runtime -p tsan-platform.
+  - Native TSDuck integration is opt-in outside the Windows GUI: --features tsan-analyzer/native-tsduck requires the target SDK via TSDUCK_HOME.
+  - Future delivery artifacts belong in developmentHelpers/outputs/deploy/linux/. Build/test intermediates belong in developmentHelpers/outputs/linux/.
+
+  - The native GUI, playback integration, package build, and updater are not implemented. There is no supported full-application build/release sequence yet.
+  - Platform status/version remains independently recorded under [linux] in platforms.toml.
+  - Future packaging must define the distribution/glibc baseline and native runtime dependencies. Wayland/X11, display protocols, GPU backends, and compositor behavior require validation.
+  - Hyprland and Niri are compositor environments to test; separate application versions per window manager are not currently defined. Windows tasks cannot establish Linux compatibility.

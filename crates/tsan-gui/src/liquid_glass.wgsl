@@ -1,5 +1,6 @@
 // Shader concepts adapted from liquidGL (NaughtyDuk) and LiquidGlass
-// (Sepehr Kalanaki). See docs/liquid-glass.md for sources and MIT notices.
+// (Sepehr Kalanaki). See docs/dev/sections/CH3_GUI.md for sources and
+// licenses/liquid-glass-notices.txt for MIT notices included in user packages.
 struct Parameters {
     // Source pixels cover the monitor; viewport UVs move independently.
     viewport: vec4<f32>, // logical width, height, pixels/point, sRGB target

@@ -58,6 +58,8 @@ impl LogEntry {
         category: LogCategory,
         message: impl Into<String>,
     ) -> Self {
+        let message = message.into();
+        tsan_diagnostics::record(level.name(), category.name(), &message);
         let unix_milliseconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis())
@@ -68,7 +70,7 @@ impl LogEntry {
             unix_milliseconds,
             level,
             category,
-            message: message.into(),
+            message,
         }
     }
 

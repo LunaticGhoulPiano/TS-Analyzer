@@ -10,4 +10,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-tsan-core = { path = "../tsan-core" }
+tsan-core = { workspace = true }

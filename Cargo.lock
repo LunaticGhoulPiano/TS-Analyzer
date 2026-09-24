@@ -2653,14 +2653,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsan-diagnostics"
+version = "0.2.0"
+dependencies = [
+ "tsan-platform",
+ "windows",
+]
+
+[[package]]
 name = "tsan-gui"
 version = "0.2.0"
 dependencies = [
  "eframe",
  "raw-window-handle",
  "tsan-analyzer",
+ "tsan-diagnostics",
  "tsan-input",
+ "tsan-platform",
  "tsan-player",
+ "tsan-runtime",
  "windows",
  "windows-core",
  "winit",
@@ -2671,6 +2682,21 @@ name = "tsan-input"
 version = "0.2.0"
 dependencies = [
  "tsan-core",
+]
+
+[[package]]
+name = "tsan-launcher"
+version = "0.2.0"
+dependencies = [
+ "tsan-diagnostics",
+ "tsan-platform",
+]
+
+[[package]]
+name = "tsan-platform"
+version = "0.2.0"
+dependencies = [
+ "windows",
 ]
 
 [[package]]
@@ -2689,6 +2715,10 @@ dependencies = [
 [[package]]
 name = "tsan-runtime"
 version = "0.2.0"
+dependencies = [
+ "tsan-analyzer",
+ "tsan-diagnostics",
+]
 
 [[package]]
 name = "tsan-tsduck-sys"

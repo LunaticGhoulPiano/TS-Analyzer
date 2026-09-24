@@ -5,16 +5,25 @@ fn main() {
     println!("cargo:rerun-if-changed=native/bridge.cpp");
     println!("cargo:rerun-if-changed=native/bridge.h");
     println!("cargo:rerun-if-env-changed=TSDUCK_HOME");
+    println!("cargo:rerun-if-env-changed=ProgramFiles");
     if env::var_os("CARGO_FEATURE_NATIVE").is_none() {
         return;
     }
 
+    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS is missing");
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let host = env::var("HOST").expect("Cargo host is missing");
+    let target = env::var("TARGET").expect("Cargo target is missing");
     let root = env::var_os("TSDUCK_HOME")
         .map(PathBuf::from)
-        .or_else(|| cfg!(windows).then(|| PathBuf::from(r"C:\Program Files\TSDuck")))
-        .expect("set TSDUCK_HOME to the installed TSDuck SDK");
+        .or_else(|| {
+            (host == target && target_os == "windows")
+                .then(|| env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join("TSDuck")))
+                .flatten()
+        })
+        .expect("set TSDUCK_HOME to the TSDuck SDK for the selected Cargo target");
     let headers = root.join("include");
-    let library = if cfg!(windows) {
+    let library = if target_os == "windows" {
         root.join("lib").join("Release-Win64")
     } else {
         root.join("lib")
@@ -37,7 +46,7 @@ fn main() {
         .include(headers.join("tscore"))
         .define("_TSDUCKDLL_USE", None)
         .define("_TSCOREDLL_USE", None)
-        .flag_if_supported(if cfg!(windows) {
+        .flag_if_supported(if target_env == "msvc" {
             "/std:c++20"
         } else {
             "-std=c++20"
